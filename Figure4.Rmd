@@ -1,0 +1,943 @@
+---
+title: "Mass Spectrometry-Based Single-Cell Proteomics Data Analysis"
+author: "Zhicheng Yang"
+date: "2025-07-15"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    code_folding: hide
+fontsize: 18pt
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.height = 6,
+  fig.width = 8,render = F
+)
+setwd(".")
+source("../../20240703function_combine.R")
+library(Seurat)
+library(scp)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(data.table)
+library(QFeatures)
+library(dplyr)
+library(stringr)
+library(SingleCellExperiment)
+group_valuess = wheel("steelblue", num = 4)
+```
+
+
+```{r function}
+calculate_miscleavage_per_sample <- function(expr_matrix) {
+  library(ggplot2)
+  library(reshape2)
+  pep_miscleava_num_calc<-function(input="AAAKDSADKR"){
+    K_num=length(strsplit(input, '')[[1]][strsplit(input, '')[[1]]=="K"])
+    R_num=length(strsplit(input, '')[[1]][strsplit(input, '')[[1]]=="R"])
+    
+    if( strsplit(input, '')[[1]][length(strsplit(input, '')[[1]])] == "K"|strsplit(input, '')[[1]][length(strsplit(input, '')[[1]])] == "R"){
+      Miscleavage=K_num+R_num-1
+    } else{
+      Miscleavage=K_num+R_num
+    }
+    if(Miscleavage==0){
+      Miscleavage=0
+    }else if(Miscleavage>0){
+      Miscleavage=1
+    }
+    return(Miscleavage)
+  }
+  peptides <- rownames(expr_matrix)
+  
+  miscleavage_vec <- sapply(peptides, pep_miscleava_num_calc)
+  
+  result_list <- lapply(colnames(expr_matrix), function(sample) {
+    sample_expr <- expr_matrix[, sample]
+    detected_idx <- which(!is.na(sample_expr))
+    detected_mc <- miscleavage_vec[detected_idx]
+    tbl <- table(factor(detected_mc, levels = 0:max(miscleavage_vec)))
+    df <- data.frame(
+      Sample = sample,
+      Miscleavage = as.numeric(names(tbl)),
+      Count = as.numeric(tbl)
+    )
+    df$Fraction <- df$Count / sum(df$Count)
+    return(df)
+  })
+  
+  result_df <- do.call(rbind, result_list)
+  
+  return(result_df)
+}
+
+calc_correlations <- function(expr, target, method = "pearson") {
+  #expr=data_pro_enzymetime_high;target = "cRAP-P00761"; method = "pearson"
+  expr <- as.data.frame(expr, stringsAsFactors = FALSE)
+  
+  features <- expr[[1]]
+  mat <- expr[,-1, drop = FALSE]
+  
+  mat[] <- lapply(mat, function(x) as.numeric(as.character(x)))
+  rownames(mat) <- features
+  
+  if (!(target %in% rownames(mat))) {
+    stop("Target feature not found in the expression matrix.")
+  }
+  
+  target_vec <- as.numeric(mat[target, ])
+  
+  safe_cor <- function(x, y, method) {
+    if (all(is.na(x)) || all(is.na(y))) return(NA)
+    suppressWarnings(cor(x, y, method = method, use ="pairwise.complete.obs"))
+  }
+  
+  cors <- sapply(rownames(mat), function(f) {
+    safe_cor(target_vec, as.numeric(mat[f, ]), method = method)
+  })
+  
+  result <- data.frame(cors,
+    stringsAsFactors = FALSE
+  )
+  result$Feature <- rownames(result)
+   result[,2]<-sub("\\.","-", result[,2])
+  
+  return(result)
+}
+calc_correlations <- function(expr, target, method = "pearson",na_threshold = 0.5) {
+  expr <- as.data.frame(expr, stringsAsFactors = FALSE)
+  
+  features <- expr[[1]]
+  mat <- expr[,-1, drop = FALSE]
+  
+  mat[] <- lapply(mat, function(x) as.numeric(as.character(x)))
+  rownames(mat) <- features
+  
+  keep <- rowMeans(is.na(mat)) <= na_threshold
+  mat <- mat[keep, , drop = FALSE]
+  
+  if (!(target %in% rownames(mat))) {
+    stop("Target feature not found in the expression matrix (it may have been filtered out).")
+  }
+  
+  target_vec <- as.numeric(mat[target, ])
+  
+  safe_cor <- function(x, y, method) {
+    if (all(is.na(x)) || all(is.na(y))) return(NA)
+    suppressWarnings(cor(x, y, method = method, use = "pairwise.complete.obs"))
+  }
+  
+  cors <- sapply(rownames(mat), function(f) {
+    safe_cor(target_vec, as.numeric(mat[f, ]), method = method)
+  })
+  result <- data.frame(cors,
+    stringsAsFactors = FALSE
+  )
+  result$Feature <- rownames(result)
+   result[,2]<-sub("\\.","-", result[,2])
+  
+  
+  return(result)
+}
+
+# calc_correlations(expr_matrix, target = "TP53", method = "pearson")
+
+
+
+```
+
+
+```{r Misc analysis}
+data_pep_enzymetime<-read.delim("./Figure4_data/20250826_111054_20250718_Report_pep.tsv")
+data_pep_enzymetime[data_pep_enzymetime=="NaN"]<-NA
+rownames(data_pep_enzymetime)<-data_pep_enzymetime$PEP.GroupingKey
+data_pep_enzymetime$PEP.GroupingKey<-NULL
+df_miss_enzymetime<-calculate_miscleavage_per_sample(data_pep_enzymetime) %>% filter(Miscleavage %in% 1)
+df_miss_enzymetime$Group1<-unname(sapply(df_miss_enzymetime$Sample, function(x) strsplit(x, "_")[[1]][4]))
+df_miss_enzymetime$Group1<-factor(df_miss_enzymetime$Group1, levels=c("low","high"))
+df_miss_enzymetime$Group2<-unname(sapply(df_miss_enzymetime$Sample, function(x) strsplit(x, "_")[[1]][5]))
+df_miss_enzymetime$Group2<-factor(df_miss_enzymetime$Group2, levels=c("5min","15min","30min","60min","120min"))
+sum_dat <- df_miss_enzymetime %>%
+  group_by(Group1, Group2) %>%
+  summarise(mean = mean(Fraction, na.rm = TRUE),
+            sd   = sd(Fraction,   na.rm = TRUE),
+            n    = sum(!is.na(Fraction)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(Group1, Group2))
+
+dig_time_mis_compare<-ggplot(sum_dat, aes(x=Group2, y=mean*100,fill=Group1)) +
+  geom_bar(stat="identity", position=position_dodge(), width=0.7,alpha=0.8,) +
+  geom_errorbar(aes(ymin=(mean-sd)*100, ymax=(mean+sd)*100), width=0.2, position=position_dodge(0.7),alpha=0.8,) +
+  geom_text(data = sum_dat, aes(x = Group2, y = mean*100, label = scales::comma(round(mean*100,4)), group = Group1),
+            position = position_dodge(0.7),color = "white",
+            fontface = "bold", size = 4, vjust = 5)+
+  geom_point(data = df_miss_enzymetime, aes(x = Group2, y = Fraction*100, group = Group1),
+             position =  position_dodge(0.7), shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.85) +
+  #scale_fill_manual(values=group_valuess,guide = "none") +
+  scale_fill_manual(values=group_valuess) +
+  labs(x="Digestion Time", y="Percentage of Missed Cleavages (%)", fill="Group")+
+  theme_yzc
+pdf("./Figure4_plot/Figure4B_dig_time_mis_compare.pdf", width=10, height=7)
+dig_time_mis_compare
+dev.off()
+
+```
+
+```{r K-M cruve}
+# install.packages(c("ggplot2", "patchwork"))
+
+library(ggplot2)
+library(patchwork)
+
+
+Km   <- 1
+Vmax <- 1
+
+S_curve <- seq(0, 5, length.out = 200)
+v_curve <- Vmax * S_curve / (Km + S_curve)
+
+df_curve <- data.frame(S = S_curve, v = v_curve)
+
+S_points <- c(0.3, 1, 3)
+v_points <- Vmax * S_points / (Km + S_points)
+
+df_points <- data.frame(
+  S_level = factor(c("Low [S]", "Medium [S]", "High [S]"),
+                   levels = c("Low [S]", "Medium [S]", "High [S]")),
+  S = S_points,
+  v = v_points
+)
+
+pA <- ggplot() +
+  geom_line(
+    data = df_curve,
+    aes(x = S, y = v),
+    linewidth = 0.8
+  ) +
+  geom_point(
+    data = df_points,
+    aes(x = S, y = v),
+    size = 2
+  ) +
+  geom_segment(
+    data = df_points,
+    aes(x = S, xend = S, y = 0, yend = v),
+    linetype = "dashed", linewidth = 0.3
+  ) +
+  labs(
+    x = "Substrate concentration (low \u2192 high)",
+    y = "Relative reaction rate (v / Vmax)",
+    title = "a"
+  ) +
+  coord_cartesian(xlim = c(0, 5), ylim = c(0, 1.05)) +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL) +
+  theme_classic(base_size = 10) +
+  theme(
+    plot.title = element_text(hjust = 0, face = "bold", vjust = 1),
+    axis.title = element_text(size = 9),
+    axis.line = element_line(linewidth = 0.4),
+    axis.ticks = element_blank()
+  )
+
+
+df_bar <- df_points
+
+pB <- ggplot(df_bar, aes(x = S_level, y = v)) +
+  geom_col(width = 0.6) +
+  geom_text(
+    aes(label = "higher rate"),
+    vjust = -0.3,
+    size = 2.5
+  ) +
+  labs(
+    x = "Substrate condition",
+    y = "Relative reaction rate (v / Vmax)",
+    title = "b"
+  ) +
+  coord_cartesian(ylim = c(0, 1.2)) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_continuous(breaks = NULL) +
+  theme_classic(base_size = 10) +
+  theme(
+    plot.title = element_text(hjust = 0, face = "bold", vjust = 1),
+    axis.title = element_text(size = 9),
+    axis.line = element_line(linewidth = 0.4),
+    axis.ticks.y = element_blank()
+  )
+
+
+p_figure <- pA / pB + 
+  plot_annotation(title = "Supplementary Figure S1. Conceptual illustration of enzyme kinetics\nunder constant enzyme concentration")
+
+p_figure
+
+# ggsave("Supp_Fig_S1_enzyme_kinetics_conceptual.png", p_figure,
+#        width = 85, height = 120, units = "mm", dpi = 600)
+
+
+
+
+
+```
+
+
+
+```{r Identity Intensity}
+data_enzymetime_pro<-read.delim("./Figure4_data/20250826_111054_20250718_Report_pro.tsv")
+data_enzymetime_pep<-read.delim("./Figure4_data/20250826_111054_20250718_Report_pep.tsv")
+data_enzymetime_pro_iden<-spectronaut_to_iden(data_enzymetime_pro)
+
+data_enzymetime_pro_iden$Group1<-unname(sapply(data_enzymetime_pro_iden$sample, function(x) strsplit(x, "_")[[1]][4]))
+data_enzymetime_pro_iden$Group1<-factor(data_enzymetime_pro_iden$Group1, levels=c("low","high"))
+data_enzymetime_pro_iden$Group2<-unname(sapply(data_enzymetime_pro_iden$sample, function(x) strsplit(x, "_")[[1]][5]))
+data_enzymetime_pro_iden$Group2<-factor(data_enzymetime_pro_iden$Group2, levels=c("5min","15min","30min","60min","120min"))
+
+data_enzymetime_pep_iden<-spectronaut_to_iden(data_enzymetime_pep)
+data_enzymetime_pep_iden$Group1<-unname(sapply(data_enzymetime_pep_iden$sample, function(x) strsplit(x, "_")[[1]][4]))
+data_enzymetime_pep_iden$Group1<-factor(data_enzymetime_pep_iden$Group1, levels=c("low","high"))
+data_enzymetime_pep_iden$Group2<-unname(sapply(data_enzymetime_pep_iden$sample, function(x) strsplit(x, "_")[[1]][5]))
+data_enzymetime_pep_iden$Group2<-factor(data_enzymetime_pep_iden$Group2, levels=c("5min","15min","30min","60min","120min"))
+
+
+
+sum_dat_pro <- data_enzymetime_pro_iden %>%
+  group_by(Group1, Group2) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(Group1, Group2))
+sum_dat_pep <- data_enzymetime_pep_iden %>%
+  group_by(Group1, Group2) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(Group1, Group2))
+
+
+iden_time_pro_compare<-ggplot(sum_dat_pro, aes(x=Group2, y=mean,fill=Group1)) +
+  geom_bar(stat="identity", position=position_dodge(), width=0.7,alpha=0.8) +
+
+  geom_errorbar(aes(ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7),alpha=0.8,) +
+  geom_text(data = sum_dat_pro, aes(x = Group2, y = mean, label = scales::comma(round(mean,4)), group = Group1),
+            position = position_dodge(0.7),color = "white",
+            fontface = "bold", size = 4, vjust = 5)+
+  geom_point(data = data_enzymetime_pro_iden, aes(x = Group2, y = p_num, group = Group1),
+             position =  position_dodge(0.7), shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.85) +
+  #scale_fill_manual(values=group_valuess,guide = "none") +
+  scale_fill_manual(values=group_valuess) +
+  labs(x=NULL, y="Protein Groups", fill="Group")+
+  theme_yzc+theme(legend.position = "none")
+iden_time_pep_compare<-ggplot(sum_dat_pep, aes(x=Group2, y=mean,fill=Group1)) +
+  geom_bar(stat="identity", position=position_dodge(), width=0.7,alpha=0.8,) +
+  geom_errorbar(aes(ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7),alpha=0.8,) +
+  geom_text(data = sum_dat_pep, aes(x = Group2, y = mean, label = scales::comma(round(mean,4)), group = Group1),
+            position = position_dodge(0.7),color = "white",
+            fontface = "bold", size = 4, vjust = 5)+
+  geom_point(data = data_enzymetime_pep_iden, aes(x = Group2, y = p_num, group = Group1),
+             position =  position_dodge(0.7), shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.85) +
+  #scale_fill_manual(values=group_valuess,guide = "none") +
+  scale_fill_manual(values=group_valuess) +
+  labs(x="Digestion Time", y="Peptides", fill="Group")+
+  theme_yzc+theme(legend.position = "bottom")
+pdf("./Figure4_plot/Figure4B_EnzymeTime_Pro_Pep_iden.pdf",width=10,height=7)
+iden_time_pro_compare/iden_time_pep_compare
+dev.off()
+
+
+```
+
+
+```{r Trypsin Intensity}
+data_pro_enzymetime<-read.delim("./Figure4_data/20250826_111054_20250718_Report_pro.tsv")
+data_pro_enzymetime[data_pro_enzymetime=="NaN"]<-NA
+
+#Trypsin is cRAP-P00761
+data_pro_enzymetime_Trypsin <- data_pro_enzymetime %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  filter(grepl("cRAP-P00761", PG.ProteinGroups)) %>%
+  pivot_longer(
+    cols = matches("\\.PG\\.Quantity"),
+    names_to = "Sample",
+    values_to = "Quantity"
+  )
+data_pro_enzymetime_Trypsin$Log10Quantity<-log10(data_pro_enzymetime_Trypsin$Quantity+1)
+data_pro_enzymetime_Trypsin$Group1<-unname(sapply(data_pro_enzymetime_Trypsin$Sample, function(x) strsplit(x, "_")[[1]][4]))
+data_pro_enzymetime_Trypsin$Group1<-factor(data_pro_enzymetime_Trypsin$Group1, levels=c("low","high"))
+
+data_pro_enzymetime_Trypsin$Group2<-unname(sapply(data_pro_enzymetime_Trypsin$Sample, function(x) strsplit(x, "_")[[1]][5]))
+data_pro_enzymetime_Trypsin$Group2<-factor(data_pro_enzymetime_Trypsin$Group2, levels=c("5min","15min","30min","60min","120min"))
+
+sum_dat_trypsin <- data_pro_enzymetime_Trypsin %>%
+  group_by(Group1, Group2) %>%
+  summarise(mean = mean(Log10Quantity, na.rm = TRUE),
+            sd   = sd(Log10Quantity,   na.rm = TRUE),
+            n    = sum(!is.na(Log10Quantity)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(Group1, Group2))
+
+
+tyrpsin_inten_compare_plot<-ggplot(sum_dat_trypsin, aes(x=Group2, y=mean,fill=Group1)) +
+  geom_point(sum_dat_trypsin, mapping=aes(x=Group2, y=mean, group=Group1,fill=Group1,color=Group1), position="identity", shape=21, size=4, stroke=0.2,
+            alpha=0.8)+
+    geom_errorbar(aes(ymin=(mean-sd), ymax=(mean+sd),color=Group1), width=0.2, position="identity") +
+  geom_line(aes(x=Group2, y=mean, group=Group1,color=Group1), position="identity", size=0.8) +
+  geom_point(data_pro_enzymetime_Trypsin, mapping=aes(x=Group2, y=Log10Quantity, group=Group1), position=position_jitterdodge(jitter.width=0.1, dodge.width=0.2), shape=21, size=2, stroke=0.2,
+             alpha=0.8)+
+    scale_fill_manual(values=group_valuess) +
+  scale_color_manual(values=group_valuess) +
+  ylim(4.5,6.5)+
+  labs(x="Digestion Time", y="Log10 Intensity of Trypsin", fill="Group")+
+  # theme_yzc+
+  # 
+  # 
+  # geom_bar(stat="identity", position=position_dodge(), width=0.7) +
+  # 
+  # geom_text(data = sum_dat_trypsin, aes(x = Group2, y = mean*100, label = scales::comma(round(mean*100,4)), group = Group1),
+  #           position = position_dodge(0.7),color = "white",
+  #           fontface = "bold", size = 4, vjust = 5)+
+  # geom_point(data = df_miss_enzymetime, aes(x = Group2, y = Fraction*100, group = Group1),
+  #            position =  position_dodge(1), shape = 21, size = 2, stroke = 0.2,
+  #            fill = "white", color = "black", alpha = 0.85) +
+  # #scale_fill_manual(values=group_valuess,guide = "none") +
+  # scale_fill_manual(values=group_valuess) +
+  # labs(x="Digestion Time", y="Intensity of Trypsin ", fill="Group")+
+  # theme_yzc
+pdf("./Figure4_plot/Figure4C_dig_time_trypsin_inten_compare.pdf", width=10, height=7)
+tyrpsin_inten_compare_plot
+dev.off()
+
+```
+
+```{r Trypsin high correlation}
+#data_pro_enzymetime<-read.delim("./Figure4_data/20250826_111054_20250718_Report_pro.tsv")
+
+#Trypsin is cRAP-P00761
+data_pro_enzymetime_Group<-data_pro_enzymetime_Trypsin %>% select(Sample, Group1,Group2)
+data_pro_enzymetime_high<-data_pro_enzymetime[,c("PG.ProteinGroups",data_pro_enzymetime_Group %>% filter(Group1=="high") %>% .[,-c(2,3), drop=T])]
+data_pro_enzymetime_low<-data_pro_enzymetime[,c("PG.ProteinGroups",data_pro_enzymetime_Group %>% filter(Group1!="high") %>% .[,-c(2,3), drop=T])]
+
+a<-calc_correlations(data_pro_enzymetime_high, target = "cRAP-P00761", method = "pearson",na_threshold = 0.5)
+length(na.omit(a$Feature[a$cors > 0.8]))
+b<-calc_correlations(data_pro_enzymetime_low, target = "cRAP-P00761", method = "pearson",na_threshold = 0.5)
+length(na.omit(b$Feature[b$cors > 0.8]))
+overlap_features <- intersect(a$Feature[a$cors > 0.8], b$Feature[b$cors > 0.8])
+
+data_pro_enzymetime_sel<-data_pro_enzymetime %>%filter(PG.ProteinGroups %in% overlap_features)
+data_pro_enzymetime_Trypsin <- data_pro_enzymetime %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  filter(grepl("cRAP-P00761", PG.ProteinGroups)) %>%
+  pivot_longer(
+    cols = matches("\\.PG\\.Quantity"),
+    names_to = "Sample",
+    values_to = "Quantity"
+  )
+data_pro_enzymetime_Trypsin$Log10Quantity<-log10(data_pro_enzymetime_Trypsin$Quantity+1)
+data_pro_enzymetime_Trypsin$Group1<-unname(sapply(data_pro_enzymetime_Trypsin$Sample, function(x) strsplit(x, "_")[[1]][4]))
+data_pro_enzymetime_Trypsin$Group1<-factor(data_pro_enzymetime_Trypsin$Group1, levels=c("low","high"))
+
+data_pro_enzymetime_Trypsin$Group2<-unname(sapply(data_pro_enzymetime_Trypsin$Sample, function(x) strsplit(x, "_")[[1]][5]))
+data_pro_enzymetime_Trypsin$Group2<-factor(data_pro_enzymetime_Trypsin$Group2, levels=c("5min","15min","30min","60min","120min"))
+
+sum_dat_trypsin <- data_pro_enzymetime_Trypsin %>%
+  group_by(Group1, Group2) %>%
+  summarise(mean = mean(Log10Quantity, na.rm = TRUE),
+            sd   = sd(Log10Quantity,   na.rm = TRUE),
+            n    = sum(!is.na(Log10Quantity)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(Group1, Group2))
+
+
+ggplot(sum_dat_trypsin, aes(x=Group2, y=mean,fill=Group1)) +
+  geom_point(sum_dat_trypsin, mapping=aes(x=Group2, y=mean, group=Group1,fill=Group1,color=Group1), position="identity", shape=21, size=4, stroke=0.2,
+            alpha=0.6)+
+    geom_errorbar(aes(ymin=(mean-sd), ymax=(mean+sd),color=Group1), width=0.2, position="identity") +
+  geom_line(aes(x=Group2, y=mean, group=Group1,color=Group1), position="identity", size=0.8) +
+  geom_point(data_pro_enzymetime_Trypsin, mapping=aes(x=Group2, y=Log10Quantity, group=Group1), position=position_jitterdodge(jitter.width=0.1, dodge.width=0.2), shape=21, size=2, stroke=0.2,
+             alpha=0.5)+
+    scale_fill_manual(values=group_valuess) +
+  scale_color_manual(values=group_valuess) +
+  ylim(4.5,6.5)+
+  labs(x="Digestion Time", y="Log10 Intensity of Trypsin", fill="Group")+
+  theme_yzc+
+
+
+  geom_bar(stat="identity", position=position_dodge(), width=0.7) +
+
+  geom_text(data = sum_dat, aes(x = Group2, y = mean*100, label = scales::comma(round(mean*100,4)), group = Group1),
+            position = position_dodge(0.7),color = "white",
+            fontface = "bold", size = 4, vjust = 5)+
+  geom_point(data = df_miss_enzymetime, aes(x = Group2, y = Fraction*100, group = Group1),
+             position =  position_dodge(1), shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.85) +
+  #scale_fill_manual(values=group_valuess,guide = "none") +
+  scale_fill_manual(values=group_valuess) +
+  labs(x="Digestion Time", y="Percentage of Missed Cleavages (%)", fill="Group")+
+  theme_yzc
+```
+
+```{r abstrat figure}
+# ===== Panel A1: Effect of substrate (enzyme fixed) =====
+
+S <- seq(0, 5, length.out = 200)
+v <- S / (1 + S)
+
+curve_df <- data.frame(S, v)
+
+pts_S <- c(0.5, 1.5, 3.8)
+pts_v <- pts_S / (1 + pts_S)
+
+pts_df <- data.frame(
+  S = pts_S,
+  v = pts_v,
+  label = c("Low\nsubstrate", "Medium\nsubstrate", "High\nsubstrate")
+)
+
+pA1 <- ggplot(curve_df, aes(S, v)) +
+  geom_line(linewidth = 0.8, colour = "black") +
+  geom_point(data = pts_df, aes(S, v), size = 2) +
+  geom_segment(
+    data = pts_df,
+    aes(x = S, xend = S, y = 0, yend = v),
+    linetype = "dashed", linewidth = 0.3
+  ) +
+  labs(
+    #title = "A1",
+    x = "Substrate concentration (low → high)",
+    y = "Relative reaction rate\n(v / Vmax)"
+  ) +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL) +
+  coord_cartesian(ylim = c(0, 1.05)) +
+  theme_classic(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0),
+    axis.ticks = element_blank())+
+  theme_yzc
+# ===== Panel A2: Effect of enzyme (substrate fixed) =====
+
+enzyme_df <- data.frame(
+  Enzyme = factor(c("Low\nenzyme",  "High\nenzyme"),
+                  levels = c("Low\nenzyme",  "High\nenzyme")),
+  rate = c(0.35, 0.95)
+)
+
+pA2 <- ggplot(enzyme_df, aes(Enzyme, rate)) +
+  geom_col(width = 0.6, fill = "grey70") +
+  labs(
+   # title = "A2",
+    x = "Enzyme concentration (low → high)",
+    y = "Relative reaction rate"
+  ) +
+  scale_y_continuous(breaks = NULL) +
+  coord_cartesian(ylim = c(0, 1.1)) +
+  theme_classic(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0),
+    axis.ticks.y = element_blank()
+  )+
+  theme_yzc
+
+figure_A <- pA1 | pA2
+
+figure_A
+
+pdf("./Figure4_plot/Figure_Abstract_Enzyme_Substrate.pdf", width=7, height=5)
+figure_A
+dev.off()
+
+```
+
+
+```{r pca}
+
+data_pro_enzymetime_1 <- data_enzymetime_pro %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) 
+data_pro_enzymetime_1[data_pro_enzymetime_1=="NaN"]<-1
+data_pro_enzymetime_impute
+overview_pca(data = data_pro_enzymetime_1[,-1],group = data_enzymetime_pro_iden$Group2,palette = c("black",group_valuess),label = "none")
+overview_pca(data = data_pro_enzymetime_1[,-1],group = data_enzymetime_pro_iden$Group1,palette = c("black",group_valuess),label = "none")
+
+
+
+```
+
+
+```{r CV vs digestion time}
+
+library(tidyverse)
+
+df_long <- data_pro_enzymetime_1 %>%
+  pivot_longer(
+    cols = -PG.ProteinGroups,
+    names_to = "sample",
+    values_to = "intensity"
+  )
+df_long <- df_long %>%
+  mutate(
+    enzyme = ifelse(str_detect(sample, "_low_"), "low", "high"),
+    time = str_extract(sample, "(?<=_)(5min|15min|30min|60min|120min)(?=_)"),
+    replicate = str_extract(sample, "rep\\d+")
+  )
+df_long <- df_long %>%
+  mutate(
+    intensity = ifelse(intensity <= 1, NA, intensity),
+   # log10_intensity = log10(intensity)
+    log10_intensity =intensity
+  )
+df_cv <- df_long %>%
+  group_by(PG.ProteinGroups, enzyme, time) %>%
+  summarise(
+    n_obs = sum(!is.na(log10_intensity)),
+    mean_logI = mean(log10_intensity, na.rm = TRUE),
+    sd_logI   = sd(log10_intensity, na.rm = TRUE),
+    cv = sd_logI / mean_logI,
+    .groups = "drop"
+  ) %>%
+  filter(n_obs >= 3, mean_logI > 0)
+df_cv <- df_cv %>%
+  mutate(
+    time = factor(
+      time,
+      levels = c("5min", "15min", "30min", "60min", "120min")
+    )
+  )
+df_cv_sum <- df_cv %>%
+  group_by(enzyme, time) %>%
+  summarise(
+    median_cv = median(cv, na.rm = TRUE),
+    q25 = quantile(cv, 0.25, na.rm = TRUE),
+    q75 = quantile(cv, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+library(ggplot2)
+pdf("./Figure4_plot/Figure4C_CV_vs_DigestionTime.pdf", width=6, height=4)
+ggplot(
+  df_cv_sum,
+  aes(x = time, y = median_cv*100, color = enzyme, group = enzyme)
+) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  # geom_errorbar(
+  #   aes(ymin = q25, ymax = q75),
+  #   width = 0.15,
+  #   linewidth = 0.6
+  # ) +
+  scale_color_manual(
+    values = c(
+      "low" = group_valuess[1],
+      "high" = group_valuess[2]
+    ),
+    labels = c("20 ng/µL", "120 ng/µL")
+  ) +
+  labs(
+    x = "Digestion time ",
+    y = "Median CV(%) ",
+    color = "Group"
+  ) +
+  theme_yzc
+dev.off()
+
+
+```
+
+```{r completeness}
+library(tidyverse)
+
+df_long <- data_pro_enzymetime_1 %>%
+  pivot_longer(
+    cols = -PG.ProteinGroups,
+    names_to = "sample",
+    values_to = "intensity"
+  )
+df_long <- df_long %>%
+  mutate(
+    enzyme = ifelse(str_detect(sample, "_low_"), "low", "high"),
+    time   = str_extract(sample, "(5min|15min|30min|60min|120min)"),
+    rep    = str_extract(sample, "rep\\d+")
+  )
+df_long <- df_long %>%
+  mutate(
+    intensity = ifelse(intensity <= 1, NA, intensity),
+    log10_intensity = log10(intensity)
+  )
+
+df_detect <- df_long %>%
+  group_by(PG.ProteinGroups, enzyme, time) %>%
+  summarise(
+    n_rep    = n_distinct(rep),
+    n_detect = sum(!is.na(log10_intensity)),
+    .groups = "drop"
+  )
+df_detect <- df_detect %>%
+  mutate(
+    complete80 = n_detect / n_rep >= 0.75
+  )
+df_completeness <- df_detect %>%
+  group_by(enzyme, time) %>%
+  summarise(
+    completeness80 = mean(complete80),
+    .groups = "drop"
+  )
+
+df_completeness <- df_completeness %>%
+  mutate(
+    time = factor(time, levels = c("5min","15min","30min","60min","120min"))
+  )
+
+ggplot(df_completeness,
+       aes(x = time, y = completeness80, color = enzyme, group = enzyme)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(
+    values = c("low" = "#2C7FB8", "high" = "#C77CFF"),
+    labels = c("20 ng/µL", "120 ng/µL")
+  ) +
+  labs(
+    x = "Digestion time",
+    y = "Completeness (≥80% replicates)",
+    color = "Enzyme concentration"
+  ) +
+  theme_classic(base_size = 14)
+
+```
+
+
+
+
+```{r cormat}
+
+
+df_median <- df_long %>%
+  group_by(PG.ProteinGroups, enzyme, time) %>%
+  summarise(
+    med_logI = mean(log10_intensity, na.rm = F),
+    #n_detect = sum(!is.na(log10_intensity)),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(med_logI))
+
+df_wide <- df_median %>%
+  unite(condition, enzyme, time, sep = "_") %>%
+  pivot_wider(
+    names_from  = condition,
+    values_from = med_logI
+  )
+
+mat <- df_wide %>%
+  select(-PG.ProteinGroups) %>%
+  as.matrix()
+
+library(PerformanceAnalytics)
+desired_order <- c(
+  "low_5min", "low_15min", "low_30min", "low_60min", "low_120min",
+  "high_5min", "high_15min", "high_30min", "high_60min", "high_120min"
+)
+pdf("./Figure4_plot/Figure4D_Correlation_Matrix.pdf", width=8, height=8)
+chart.Correlation(
+  mat[,desired_order],
+  method = "pearson",
+  histogram = TRUE,
+  pch = 20
+)
+dev.off()
+
+
+```
+```{r df_mat}
+
+# df_cv_sum$fill_group<-paste(df_cv_sum$enzyme,df_cv_sum$time,sep=" ") 
+# df_cv_sum<-arrange(df_cv_sum,desc(fill_group))
+# sum_dat_pro<-arrange(sum_dat_pro,desc(fill_group))
+# sum_dat<-arrange(sum_dat,desc(fill_group))
+# df_metrics<-data.frame(Pgs=sum_dat_pro$mean,
+#                        CV=df_cv_sum$median_cv*100,
+#                        Miss=sum_dat$mean*100,
+#                        enzyme_time=df_cv_sum$time,
+#                        enzyme=df_cv_sum$enzyme)
+# library(tidyverse)
+
+df <- df_metrics %>%
+  dplyr::rename(
+    protein_groups = Pgs,
+    median_cv = CV,
+    missed_cleavage = Miss,
+    time = enzyme_time
+  ) %>%
+  mutate(
+    time_min = as.numeric(str_remove(time, "min")),
+    enzyme_ng = ifelse(enzyme == "high", 120, 20)
+  )
+df <- df %>%
+  mutate(
+    s_protein = (protein_groups - min(protein_groups)) /
+                (max(protein_groups) - min(protein_groups))
+  )
+df <- df %>%
+  mutate(
+    s_missed = (max(missed_cleavage) - missed_cleavage) /
+               (max(missed_cleavage) - min(missed_cleavage)),
+
+    s_cv = (max(median_cv) - median_cv) /
+           (max(median_cv) - min(median_cv)),
+
+    s_time = (max(time_min) - time_min) /
+             (max(time_min) - min(time_min)),
+
+    s_enzyme = (max(enzyme_ng) - enzyme_ng) /
+               (max(enzyme_ng) - min(enzyme_ng))
+  )
+df <- df %>%
+  mutate(
+    total_score =
+      0.35 * s_protein +
+      0.30 * s_missed +
+      0.05 * s_cv +
+      0.25 * s_time +
+      0.05 * s_enzyme
+  )
+
+
+
+
+
+df_stack <- df %>%
+  mutate(
+    contrib_protein = 0.50 * s_protein,
+    contrib_missed  = 0.20 * s_missed,
+    contrib_cv      = 0.05 * s_cv,
+    contrib_time    = 0.20 * s_time,
+    contrib_enzyme  = 0.05 * s_enzyme
+  )
+df_stack_long <- df_stack %>%
+  select(time, enzyme, starts_with("contrib_")) %>%
+  pivot_longer(
+    cols = starts_with("contrib_"),
+    names_to = "metric",
+    values_to = "contribution"
+  )
+library(ggplot2)
+
+ggplot(
+  df_stack_long,
+  aes(x = paste(time, enzyme), y = contribution, fill = metric)
+) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(
+    values = c(
+      "contrib_protein" = "#4575b4",
+      "contrib_missed"  = "#fdae61",
+      "contrib_cv"      = "#91bfdb",
+      "contrib_time"    = "#66c2a5",
+      "contrib_enzyme"  = "#e6f598"
+    ),
+    labels = c(
+      "Protein ID",
+      "Missed cleavage",
+      "CV",
+      "Digestion time",
+      "Enzyme load"
+    )
+  ) +
+  labs(
+    x = "Digestion condition",
+    y = "Weighted score contribution",
+    fill = "Metric"
+  ) +
+  theme_classic(base_size = 14)
+df_stack_long <- df_stack_long %>%
+  left_join(
+    df %>% select(time, enzyme, total_score),
+    by = c("time", "enzyme")
+  )
+df_stack_long <- df_stack_long %>%
+  mutate(
+    condition = paste(time, enzyme),
+    condition = factor(
+      condition,
+      levels = df %>%
+        arrange(desc(total_score)) %>%
+        mutate(condition = paste(time, enzyme)) %>%
+        pull(condition)
+    )
+  )
+
+library(ggplot2)
+
+p_score<-ggplot(
+  df_stack_long,
+  aes(x = condition, y = contribution, fill = metric)
+) +
+  geom_col(width = 0.7) +
+scale_fill_manual(
+  values = c(
+    "contrib_protein" = "#4682B4",
+    "contrib_missed"  = "#4BB446",
+    "contrib_time"    = "#B47846",
+    "contrib_enzyme"  = "#AF46B4",
+    "contrib_cv"      = "#B0B0B0"
+  )
+  # labels = c(
+  #   "Protein identification",
+  #   "Missed cleavage",
+  #   "Digestion time",
+  #   "Enzyme consumption",
+  #   "Quantitative CV"
+  # )
+)+
+
+  theme_yzc+theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    legend.position = "right"
+  )
+pdf("./Figure4_plot/Figure4E_Digestion_Condition_Score_Stacked_Barplot.pdf", width=7, height=5)
+print(p_score)
+dev.off()
+
+```
+
+
+```{r df_weight}
+
+df_weight <- tibble(
+  metric = c("Protein identification",
+             "Missed cleavage",
+             "Digestion time",
+             "Quantitative CV",
+             "Enzyme consumption"),
+  weight = c(0.50, 0.20, 0.20, 0.05, 0.05)
+)
+p_weight<-ggplot(df_weight, aes(x = metric, y = weight, fill = metric)) +
+  geom_col(width = 0.6) +
+  theme_classic(base_size = 14) +
+  labs(
+    y = "Weight",
+    x = NULL,
+    title = "Relative importance of evaluation metrics"
+  ) +theme_yzc+
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    legend.position = "none"
+  )
+
+pdf("./Figure4_plot/Figure4E_Digestion_Condition_Score_Weight_Barplot.pdf", width=5, height=4)
+print(p_weight)
+dev.off()
+```
