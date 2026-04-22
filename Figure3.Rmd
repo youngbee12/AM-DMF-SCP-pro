@@ -1,0 +1,764 @@
+---
+title: "Mass Spectrometry-Based Single-Cell Proteomics Data Analysis"
+author: "Zhicheng Yang"
+date: "2025-09-03"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    code_folding: hide
+fontsize: 18pt
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.height = 6,
+  fig.width = 8,render = F
+)
+setwd(".")
+source("../../20240703function_combine.R")
+library(Seurat)
+library(scp)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(data.table)
+library(QFeatures)
+library(dplyr)
+library(stringr)
+library(SingleCellExperiment)
+group_valuess = wheel("steelblue", num = 4)
+```
+
+```{r function}
+
+
+```
+
+
+```{r conusme}
+#standard 20ng/ul*1uL   20ng/ul*3nL
+#compare state of art method
+# install.packages(c("ggplot2","ggbreak","tidyr","dplyr","ggfun))
+
+library(ggplot2)
+library(ggbreak)
+library(tidyr)
+library(dplyr)
+library(ggfun)
+df <- data.frame(
+  method = c("AM-DMF-SCP", "Cellenone"),
+  volume_nL = c(120, 20000)
+)
+
+p_compare<-ggplot(df, aes(x = method, y = volume_nL, fill = method)) +
+  geom_col(width = 0.6,alpha = 0.8) +
+  geom_text(aes(label = paste0(volume_nL, " pg Trypsin")),
+            vjust = -0.5, size = 5, fontface = "bold") +
+  scale_y_break(c(150, 19000), scales = 2) +
+  ylim(0,21000)+
+  scale_fill_manual(values = c("AM-DMF-SCP" =group_valuess[[1]], 
+                               "Cellenone" = group_valuess[[2]]),) +
+  labs(x = NULL, y = NULL) +
+   coord_flip()+
+   annotate("text", x = 2,   y = 19000, label = "//", size = 8, fontface = "bold") +
+  theme_transparent()+
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none",
+        axis.text = element_text(size=16))
+pdf("./Figure3_plot/figure3A_consume.pdf",width=5,height=3)
+p_compare
+dev.off()
+```
+
+
+```{r blankdrop}
+data_blank_am_pro<-read.delim("./Figure3_data/20250826_183857_20250719_Report_blank_pro.tsv")
+data_blank_am_pep<-read.delim("./Figure3_data/20250826_183857_20250719_Report_blank_pep.tsv")
+data_blank_cel_pro<-read.delim("./Figure3_data/20250826_183857_20250719_Report_blank_cellenone_pro.tsv")
+data_blank_cel_pep<-read.delim("./Figure3_data/20250826_183857_20250719_Report_blank_cellenone_pep.tsv")
+
+
+pep_am_amoun<-spectronaut_to_iden(data_blank_am_pep)
+pep_am_amoun$source<-"AM-DMF-SCP"
+pro_am_amoun<-spectronaut_to_iden(data_blank_am_pro)
+pro_am_amoun$source<-"AM-DMF-SCP"
+pep_cel_amoun<-spectronaut_to_iden(data_blank_cel_pep)
+pep_cel_amoun$source<-"Cellenone"
+pro_cel_amoun<-spectronaut_to_iden(data_blank_cel_pro)
+pro_cel_amoun$source<-"Cellenone"
+
+pro_blank <- rbind(pro_am_amoun, pro_cel_amoun)
+pep_blank <- rbind(pep_am_amoun, pep_cel_amoun)
+
+
+# install.packages(c("ggplot2","ggpubr"))
+
+library(ggplot2)
+library(ggpubr)
+
+
+pro_blank$source <- factor(pro_blank$source, levels =unique(pro_blank$source) )
+
+sum_pro_blank <- pro_blank %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+
+p_blankdrop_left<-ggplot() +
+  geom_bar(data = sum_pro_blank,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pro_blank,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+ # geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_signif(data = pro_blank, aes(x = source, y = p_num),
+    comparisons = list(c("AM-DMF-SCP", "Cellenone")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    y_position = max(pro_blank$p_num) + 5,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+  ylim(0,130)+
+  scale_fill_manual(values = c("AM-DMF-SCP" =group_valuess[[1]], "Cellenone" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Protein Groups") +
+ theme_yzc+
+  theme(legend.position = "none")
+
+pep_blank$source <- factor(pep_blank$source, levels =unique(pep_blank$source) )
+sum_pep_blank <- pep_blank %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+p_blankdrop_right<-ggplot() +
+  geom_bar(data = sum_pep_blank,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pep_blank,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+ # geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_signif(data = pep_blank, aes(x = source, y = p_num),
+    comparisons = list(c("AM-DMF-SCP", "Cellenone")),
+    test = "wilcox.test",
+    map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    y_position = max(pep_blank$p_num) + 5,
+    tip_length = 0.01,
+    textsize = 5,
+  ) +
+  ylim(0,220)+
+  scale_fill_manual(values = c("AM-DMF-SCP" =group_valuess[[1]], "Cellenone" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Peptides") +
+ theme_yzc+
+  theme(legend.position = "none")
+
+library(patchwork)
+pdf("./Figure3_plot/Figure3A_blankdrop.pdf",width = 7,height = 4)
+p_blankdrop_left + p_blankdrop_right
+dev.off()
+
+
+
+
+
+
+data_compare_pro_clean<-data_compare_pro %>%
+  dplyr::select(-c(PG.ProteinGroups, PG.NrOfPrecursorsIdentified..Experiment.wide., PG.Organisms))%>%
+  dplyr::filter(PG.Genes != "")
+data_compare_pro_clean[data_compare_pro_clean=="NaN"] <- NA
+data_compare_pro_clean<-keep_first_Gene_sp(data_compare_pro_clean)
+#prot_df_clean<-keep_first_Gene(prot_df_clean)
+data_compare_pro_clean<-samerow_mean(data_compare_pro_clean)
+data_compare_pro_clean$Genes<-NULL
+data_compare_pro_clean<-data_compare_pro_clean[,grep(".Quantity",colnames(data_compare_pro_clean))]
+expr_matrix <- as.matrix(data_compare_pro_clean)
+metadata<-data.frame(cha_label = rep(c("Cellenone","AM-DMF-SCP"),each=5),sample=colnames(data_compare_pro_clean))
+rownames(metadata)<-metadata$sample
+cum_tbl_blocks <- cumulative_ids_group_blocks(expr_matrix, metadata %>%select(cha_label),
+                                              group_order = "by_total_desc",
+                                              within_group_order = "desc_ids")
+p_rankplot<-plot_rank_by_group(expr_matrix, metadata %>%select(cha_label),
+                        top_n = 6, bottom_n = 6,
+                        y_scale = "log10",
+                         min_prev_prop = 0.5,
+                         colors = c("AM-DMF-SCP"=group_valuess[1], "Cellenone"=group_valuess[2])
+                        )+theme_yzc+theme(
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold")
+    )+labs(title = NULL,x=NULL)
+pdf("./Figure3_plot/Figure3B_compare_rankplot.pdf",width =7,height = 4)
+p_rankplot
+dev.off()
+
+
+
+
+
+
+```
+
+```{r compare}
+library(ggplot2)
+
+df <- data.frame(
+  method = c("AM-DMF-SCP", "Well-plate"),
+  volume = c(6, 1000)
+)
+
+ggplot(df, aes(x = method, y = volume, size = volume, fill = method)) +
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(max_size = 20) +
+   
+  geom_text(aes(label = paste0(volume, " nL")),
+            vjust = -3, size = 5) +
+  ylim(0,1150)+
+  labs(x = NULL, y = "Volume of sample preparation")+
+    scale_fill_manual(values = c(group_valuess[[1]], group_valuess[[2]])) +
+  
+  theme_yzc+theme(legend.position = "none")
+
+pdf("./Figure3_plot/Figure3B_compare_volume.pdf",width = 5,height = 5)
+ggplot(df, aes(x = method, y = volume, size = volume, fill = method)) +
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(max_size = 20) +
+   
+  geom_text(aes(label = paste0(volume, " nL")),
+            vjust = -3, size = 5) +
+  ylim(0,1150)+
+  labs(x = NULL, y = "Volume of sample preparation")+
+    scale_fill_manual(values = c(group_valuess[[1]], group_valuess[[2]])) +
+  
+  theme_yzc+theme(legend.position = "none")
+dev.off()
+
+
+```
+
+```{r realsample}
+data_compare_pro<-read.delim("./Figure3_data/20250826_111209_Cellenone_Report_pro.tsv")
+data_compare_pep<-read.delim("./Figure3_data/20250826_111209_Cellenone_Report_pep.tsv")
+
+pro_compare<-spectronaut_to_iden(data_compare_pro)
+
+pro_compare$source<-c(rep("Cellenone",5),rep("AM-DMF-SCP",5))
+
+pep_compare<-spectronaut_to_iden(data_compare_pep)
+pep_compare$source<-c(rep("Cellenone",5),rep("AM-DMF-SCP",5))
+
+sum_pro_compare <- pro_compare %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+sum_pep_compare <- pep_compare %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+
+p_comparedrop_left<-ggplot() +
+  geom_bar(data = sum_pro_compare,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pro_compare,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+ # geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_signif(data = pro_compare, aes(x = source, y = p_num),
+    comparisons = list(c("AM-DMF-SCP", "Cellenone")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    y_position = max(pro_compare$p_num) + 5,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+ 
+  scale_fill_manual(values = c("AM-DMF-SCP" =group_valuess[[1]], "Cellenone" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Protein Groups") +
+ theme_yzc+
+  theme(legend.position = "none")
+
+p_comparedrop_right<-ggplot() +
+  geom_bar(data = sum_pep_compare,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pep_compare,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+ # geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_signif(data = pep_compare, aes(x = source, y = p_num),
+    comparisons = list(c("AM-DMF-SCP", "Cellenone")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    y_position = max(pep_compare$p_num) + 500,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+  scale_fill_manual(values = c("AM-DMF-SCP" =group_valuess[[1]], "Cellenone" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Peptides") +
+ theme_yzc+
+  theme(legend.position = "none")
+pdf("./Figure3_plot/Figure3A_realsample.pdf",width = 7,height = 4)
+p_comparedrop_left + p_comparedrop_right
+dev.off()
+```
+
+```{r rankplot}
+# > data_compare_pro[46,2]<-"cRAP-P00761"
+# > data_compare_pro[47,2]<-"cRAP-P00767"
+# > data_compare_pro[4,2]<-"ARHGEF5"
+# > data_compare_pro[67,2]<-"cRAP-P15252"
+# > data_compare_pro[848,2]<-"P0DMU3"
+# > data_compare_pro[2748,2]<-"Q6ZSR9"
+data_compare_pro_clean<-data_compare_pro %>%
+  dplyr::select(-c(PG.ProteinGroups, PG.NrOfPrecursorsIdentified..Experiment.wide., PG.Organisms))%>%
+  dplyr::filter(PG.Genes != "")
+data_compare_pro_clean[data_compare_pro_clean=="NaN"] <- NA
+data_compare_pro_clean<-keep_first_Gene_sp(data_compare_pro_clean)
+#prot_df_clean<-keep_first_Gene(prot_df_clean)
+data_compare_pro_clean<-samerow_mean(data_compare_pro_clean)
+data_compare_pro_clean$Genes<-NULL
+data_compare_pro_clean<-data_compare_pro_clean[,grep(".Quantity",colnames(data_compare_pro_clean))]
+expr_matrix <- as.matrix(data_compare_pro_clean)
+metadata<-data.frame(cha_label = rep(c("Cellenone","AM-DMF-SCP"),each=5),sample=colnames(data_compare_pro_clean))
+rownames(metadata)<-metadata$sample
+cum_tbl_blocks <- cumulative_ids_group_blocks(expr_matrix, metadata %>%select(cha_label),
+                                              group_order = "by_total_desc",
+                                              within_group_order = "desc_ids")
+p_rankplot<-plot_rank_by_group(expr_matrix, metadata %>%select(cha_label),
+                        top_n = 6, bottom_n = 6,
+                        y_scale = "log10",
+                         min_prev_prop = 0.5,
+                         colors = c("AM-DMF-SCP"=group_valuess[1], "Cellenone"=group_valuess[2])
+                        )+theme_yzc+theme(
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold")
+    )+labs(title = NULL,x=NULL)
+pdf("./Figure3_plot/Figure3B_compare_rankplot.pdf",width =7,height = 4)
+p_rankplot
+dev.off()
+
+```
+
+
+```{r miscleavage}
+
+
+
+rownames(data_compare_pep)<-data_compare_pep$PEP.GroupingKey
+data_compare_pep[data_compare_pep=="NaN"]<-NA
+data_compare_pep$PEP.GroupingKey<-NULL
+df_miss_compare_pep<-calculate_miscleavage_per_sample(data_compare_pep) %>% filter(Miscleavage %in% 1)
+df_miss_compare_pep$source<-c(rep("Cellenone",5),rep("AM-DMF-SCP",5))
+sum_miss_pep_compare <- df_miss_compare_pep %>%
+  group_by(source) %>%
+  summarise(mean = mean(Fraction, na.rm = TRUE),
+            sd   = sd(Fraction,   na.rm = TRUE),
+            n    = sum(!is.na(Fraction)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+pdf("./Figure3_plot/Figure3B_realsample_misscleavage.pdf",width = 7,height = 5)
+ggplot() +
+  geom_bar(data = sum_miss_pep_compare,aes(x=source,y=mean*100,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_miss_pep_compare,aes(x=source,ymin=(mean-sd)*100, ymax=(mean+sd)*100), width=0.2, position=position_dodge(0.7)) +
+ # geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_text(data = sum_miss_pep_compare, aes(x = source, y = mean*100, label = sprintf("%.2f%%", mean*100)), 
+            vjust = 4, size = 5) +
+  geom_signif(data = df_miss_compare_pep, aes(x = source, y = Fraction*100),
+    comparisons = list(c("AM-DMF-SCP", "Cellenone")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    #y_position = max(df_miss_compare_pep$Fraction) + 5,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+ 
+  scale_fill_manual(values = c("AM-DMF-SCP" =group_valuess[[1]], "Cellenone" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Misscleavage Rate (%)") +
+ theme_yzc+
+  theme(legend.position = "none")
+dev.off()
+```
+
+```{r Trypsin Intensity}
+data_pro_compare<-read.delim("./Figure3_data/20250826_111209_Cellenone_Report_pro.tsv")
+data_pro_compare[data_pro_compare=="NaN"]<-NA
+
+#Trypsin is cRAP-P00761
+data_pro_compare_Trypsin <- data_pro_compare %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  filter(grepl("cRAP-P00761", PG.ProteinGroups)) %>%
+  pivot_longer(
+    cols = matches("\\.PG\\.Quantity"),
+    names_to = "Sample",
+    values_to = "Quantity"
+  )
+data_pro_compare_Trypsin$Log10Quantity<-log10(data_pro_compare_Trypsin$Quantity+1)
+data_pro_compare_Trypsin$source<-c(rep("Cellenone",5),rep("AM-DMF-SCP",5))
+
+
+sum_dat_trypsin <- data_pro_compare_Trypsin %>%
+  group_by(source) %>%
+  summarise(mean = mean(Log10Quantity, na.rm = TRUE),
+            sd   = sd(Log10Quantity,   na.rm = TRUE),
+            n    = sum(!is.na(Log10Quantity)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+
+pdf("./Figure3C_realsample_Trypsin.pdf_v1.pdf",width = 5,height = 5)
+ggplot(sum_dat_trypsin, aes(x=source, y=mean,fill=source)) +
+  geom_point(sum_dat_trypsin, mapping=aes(x=source, y=mean, group=source,fill=source,color=source), position="identity", shape=21, size=4, stroke=0.2,
+            alpha=0.6)+
+    geom_errorbar(aes(ymin=(mean-sd), ymax=(mean+sd),color=source), width=0.2, position="identity") +
+  geom_line(aes(x=source, y=mean, group=source,color=source), position="identity", size=0.8) +
+  geom_point(data_pro_compare_Trypsin, mapping=aes(x=source, y=Log10Quantity, group=source), position=position_jitterdodge(jitter.width=0.1, dodge.width=0.2), shape=21, size=2, stroke=0.2,
+             alpha=0.5)+
+   geom_signif(data = data_pro_compare_Trypsin, aes(x = source, y =Log10Quantity),
+    comparisons = list(c("AM-DMF-SCP", "Cellenone")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    #y_position = max(df_miss_compare_pep$Fraction) + 5,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+    scale_fill_manual(values=group_valuess) +
+  scale_color_manual(values=group_valuess) +
+  ylim(3.5,6.5)+
+  labs(x=NULL, y="Log10 Intensity of Trypsin", fill="Group")+
+  theme_yzc+
+  theme(legend.position = "none")
+
+dev.off()
+
+```
+
+```{r cRAP Intensity}
+data_pro_compare<-read.delim("./Figure3_data/20250826_111209_Cellenone_Report_pro.tsv")
+data_pro_compare[data_pro_compare=="NaN"]<-NA
+
+#Trypsin is cRAP-P00761
+data_pro_compare_cRAP <- data_pro_compare %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  filter(grepl("cRAP", PG.ProteinGroups)) %>%
+  pivot_longer(
+    cols = matches("\\.PG\\.Quantity"),
+    names_to = "Sample",
+    values_to = "Quantity"
+  )
+data_pro_compare_cRAP_UPSET <- data_pro_compare %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  filter(grepl("cRAP", PG.ProteinGroups)) 
+rownames(data_pro_compare_cRAP_UPSET)<-data_pro_compare_cRAP_UPSET$PG.ProteinGroups
+data_pro_compare_cRAP_UPSET$PG.ProteinGroups<-NULL
+  
+
+data_pro_compare_cRAP$Log10Quantity<-log10(data_pro_compare_cRAP$Quantity+1)
+group_info_compare_cRAP<-data.frame(Sample=unique(data_pro_compare_cRAP$Sample),
+                                 source=c(rep("Well-plate",5),rep("AM-DMF-SCP",5)))
+data_pro_compare_cRAP<-merge(data_pro_compare_cRAP,group_info_compare_cRAP,by="Sample")
+
+
+sum_dat_cRAP <- data_pro_compare_cRAP %>%
+  group_by(source,PG.ProteinGroups) %>%
+  summarise(mean = mean(Log10Quantity, na.rm = TRUE),
+            sd   = sd(Log10Quantity,   na.rm = TRUE),
+            n    = sum(!is.na(Log10Quantity)),
+            .groups = "drop") %>%
+  mutate(fill_group = source)
+sum_dat_cRAP<-sum_dat_cRAP%>% filter(n>3)
+pdf("./Figure3_plot/Figure3C_realsample_cRAP.pdf",width = 12,height = 18)
+ggplot(sum_dat_cRAP, aes(x=source, y=mean,fill=source)) +
+  geom_point(sum_dat_cRAP, mapping=aes(x=source, y=mean, group=source,fill=source,color=source), position="identity", shape=21, size=4, stroke=0.2,
+            alpha=0.6)+
+  facet_wrap(~PG.ProteinGroups, ncol=6)+
+  theme_pubr()
+dev.off()
+
+Cellenone_cRAP<-unique(sum_dat_cRAP$PG.ProteinGroups[sum_dat_cRAP$source=="Cellenone"])
+AM_DMF_SCP_cRAP<-unique(sum_dat_cRAP$PG.ProteinGroups[sum_dat_cRAP$source=="AM-DMF-SCP"])
+
+
+p_cRAP_UPSET<-plot_upset_from_expr(expr_df = data_pro_compare_cRAP_UPSET, 
+                                                group_info1 = group_info_compare_cRAP,
+                                                  threshold = 0.4,
+                                 n_intersections = 3,
+                                 y_limit = NULL)
+
+
+  p <- ggplot(upset_df) +
+    #geom_text(stat = 'count', aes(label = after_stat(count)), vjust = -1) +
+    geom_bar() +
+    scale_x_upset(n_intersections = 3) +
+    ylab("") + xlab("") +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.line = element_line(size = 1.5),
+      axis.text.x = element_text(color = "black", size = 12, face = "plain", angle = 45, hjust = 1),
+      axis.text.y = element_text(color = "black", size = 12, face = "plain"),
+      axis.title.x = element_text(color = "black", size = 16, face = "bold"),
+      axis.title.y = element_text(color = "black", size = 16, face = "bold"),
+      legend.text = element_text(color = "black", size = 16, face = "bold"),
+      legend.title = element_text(color = "black", size = 16, face = "bold"),
+      title = element_text(color = "black", size = 16, face = "bold")
+    )
+  library(ggplot2)
+ggplot(tidy_movies[1:100, ], aes(x=Genres)) +
+  geom_bar() +
+  scale_x_upset(reverse = TRUE, sets=c("Drama", "Action"))
+B<-tidy_movies[1:100, ]
+data_pro_compare_cRAP_1<-data_pro_compare_cRAP
+rownames(data_pro_compare_cRAP_1)<-data_pro_compare_cRAP_1$PG.ProteinGroups
+data_pro_compare_cRAP_1$PG.ProteinGroups<-NULL
+group_info_compare_cRAP1<-group_info_compare_cRAP
+rownames(group_info_compare_cRAP1)<-group_info_compare_cRAP1$Sample
+data_CRAP_UPSET<-prepare_upset_from_expr(expr_df = data_pro_compare_cRAP_1,
+                     group_info1=group_info_compare_cRAP1 %>% dplyr::select(source),
+                                 threshold = 0.5,
+                                 n_intersections = 3,
+                                 y_limit = 35
+                     )
+data_CRAP_UPSET2 <- data_CRAP_UPSET %>%
+  mutate(comb_lab = vapply(
+    upsetR, function(v) paste(sort(v), collapse = " & "), character(1)
+  ))
+
+
+pal <- c(
+  "Cellenone"                   = "#E64B35",
+  "AM-DMF-SCP"                  = "#4DBBD5",
+  "AM-DMF-SCP & Cellenone"      = "#3C5488"
+)
+
+ggplot(data_CRAP_UPSET2, aes(x = upsetR, fill = comb_lab)) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.8) +
+  geom_bar(color = "grey15",alpha=0.8,width = 0.4) +
+  scale_fill_manual(values = group_valuess, guide = "none") +
+  ylim(0,35)+
+  scale_x_upset(n_intersections = n_intersections,
+                sets = c("Cellenone","AM-DMF-SCP")) +
+  labs(x=NULL,y=NULL)+
+theme_yzc+
+  theme_combmatrix(
+    combmatrix.panel.point.color.fill  = "black",
+    combmatrix.panel.point.color.empty = "grey80",
+    combmatrix.panel.line.color        = "black",
+    combmatrix.panel.point.size        = 3,
+        combmatrix.label.height = grid::unit(150, "pt"),
+    combmatrix.label.extra_spacing = 3,
+    combmatrix.label.total_extra_spacing = grid::unit(6, "pt"),
+    combmatrix.panel.margin = grid::unit(c(2, 2), "pt")
+  )
+
+
+```
+```{r protein_abs_copynum}
+proteins_all <- read.csv("./ref_code/Protein_abs_copynum/HeLaHF14k.csv")
+  rownames(proteins_all)<-proteins_all$Accession
+  gene<-data.frame(proteins_all$Accession)
+  print(dim(gene)[1])
+  colnames(gene)<-"gene"
+  
+  
+#all
+data_pro_compare_all<- data_pro_compare %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  #filter(grepl("cRAP", PG.ProteinGroups)) %>%
+  pivot_longer(
+    cols = matches("\\.PG\\.Quantity"),
+    names_to = "Sample",
+    values_to = "Quantity"
+  )
+
+data_pro_compare_all$Log10Quantity<-log10(data_pro_compare_all$Quantity+1)
+group_info_compare_cRAP<-data.frame(Sample=unique(data_pro_compare_all$Sample),
+                                 source=c(rep("Cellenone",5),rep("AM-DMF-SCP",5)))
+data_pro_compare_all<-merge(data_pro_compare_all,group_info_compare_cRAP,by="Sample")
+
+  sum_dat_compare <- data_pro_compare_all %>%
+  group_by(source,PG.ProteinGroups) %>%
+  summarise(mean = mean(Log10Quantity, na.rm = TRUE),
+            sd   = sd(Log10Quantity,   na.rm = TRUE),
+            n    = sum(!is.na(Log10Quantity)),
+            .groups = "drop") %>%
+  mutate(fill_group = source)
+sum_dat_compare<-sum_dat_compare%>% filter(n>2)
+Cellenone_all<-unique(sum_dat_compare$PG.ProteinGroups[sum_dat_compare$source=="Cellenone"])
+AM_DMF_SCP_all<-unique(sum_dat_compare$PG.ProteinGroups[sum_dat_compare$source=="AM-DMF-SCP"])
+
+  ### Get the overlap
+  proteins_both <- proteins_all %>%
+    dplyr::filter( Accession%in% Cellenone_all)
+  proteins_both2 <- proteins_all %>%
+    filter(Accession %in% AM_DMF_SCP_all)
+proteins_all_final<-proteins_all
+ggplot(proteins_all_final) +
+    xlab("Log")+
+    ylab("Count")+
+    geom_histogram(
+      data = proteins_all_final,
+      aes_string(x = "Log"), 
+      color = color_all,
+      fill = color_all,
+      alpha = transparency,
+      bins = 20
+    ) +geom_vline(xintercept=mean(proteins_all_final$Log),linetype = "dashed")+
+    geom_histogram(
+      data = proteins_both,
+      aes_string(x = "Log"), 
+      color = "#4682B4",
+      fill = "#4682B4",
+      alpha = transparency,
+      bins = 20
+    )+geom_vline(xintercept=mean(proteins_both$Log),color="#4682B4",linetype = "dashed")+
+    geom_histogram(
+      data = proteins_both2,
+      aes_string(x = "Log"), 
+      color = "#AF46B4",
+      fill = color_both,
+      alpha = transparency,
+      bins = 20
+    ) +geom_vline(xintercept=mean(proteins_both2$Log),color="#AF46B4",linetype = "dashed")+
+    
+    
+    geom_text(aes(x =4, y = 1000, label = paste0("Mean(All) = ", round(mean(proteins_all_final$Log), 2))),
+                    hjust = 0, vjust = 1, color = "black", size = 6) +  
+    geom_text(aes(x =4, y = 1000, label = paste0("\nMean(Cellenone)= ",round(mean(proteins_both$Log), 2))),
+                    hjust = 0, vjust = 1, color = "#4682B4", size =6) +  
+    geom_text(aes(x =4, y = 1000, label = paste0("\n\nMean(AM_DMF_SCP)= ",round(mean(proteins_both2$Log), 2))),
+                    hjust = 0, vjust = 1, color = "#AF46B4", size = 6) +
+    theme_bw() +
+    
+    theme(  #legend.position = "none",
+            #axis.line = element_line(size=1.5),
+            axis.text.x = element_text(color="black", size=16, face="plain",angle=0,hjust=0.5) ,# Values for face are one of "plain", "italic", "bold" and "bold.italic"
+            axis.text.y = element_text(color="black", size=16, face="plain"),
+            axis.title.x = element_text(color="black", size=16, face="bold"),
+            axis.title.y = element_text(color="black", size=16, face="bold"),
+            legend.text=element_text(color="black", size=16, face="bold"),
+            legend.title=element_text(color="black", size=16, face="bold"),
+            title = element_text(color="black", size=16, face="bold"))+
+  theme_yzc
+
+    
+dev.off()
+
+```
+
+```{r one vs two}
+data_one_vs_two_pro<-read.delim("./Figure3_data/20250919_104403_20250907_Report_pro.tsv")
+data_one_vs_two_pep<-read.delim("./Figure3_data/20250919_104403_20250907_Report_pep.tsv")
+
+pro_one_vs_two<-spectronaut_to_iden(data_one_vs_two_pro)
+
+pro_one_vs_two$source<-c(rep("One-step",10),rep("Two-step",10))
+
+pep_one_vs_two<-spectronaut_to_iden(data_one_vs_two_pep)
+pep_one_vs_two$source<-c(rep("One-step",10),rep("Two-step",10))
+
+sum_pro_one_vs_two <- pro_one_vs_two %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+sum_pep_one_vs_two <- pep_one_vs_two %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+p_one_vs_two_left<-ggplot() +
+  geom_bar(data = sum_pro_one_vs_two,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pro_one_vs_two,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+  #geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_signif(data = pro_one_vs_two, aes(x = source, y = p_num),
+    comparisons = list(c("One-step", "Two-step")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    y_position = max(pro_one_vs_two$p_num) + 5,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+ 
+  scale_fill_manual(values = c("One-step" =group_valuess[[1]], "Two-step" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Protein Groups") +
+ theme_yzc+
+  theme(legend.position = "none")
+
+p_one_vs_two_right<-ggplot() +
+  geom_bar(data = sum_pep_one_vs_two,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pep_one_vs_two,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+ # geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+  geom_signif(data = pep_one_vs_two, aes(x = source, y = p_num),
+     comparisons = list(c("One-step", "Two-step")),
+    test = "wilcox.test",
+     map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+                ifelse(p < 0.01,  "**",
+                ifelse(p < 0.05,  "*", "ns")))
+        sprintf("p = %.3f\n%s", p, stars)
+    },
+    y_position = max(pep_one_vs_two$p_num) + 500,
+    tip_length = 0.01,
+    textsize = 5
+  ) +
+   scale_fill_manual(values = c("One-step" =group_valuess[[1]], "Two-step" = group_valuess[[2]])) +
+  labs(x = NULL, y = "Peptides") +
+ theme_yzc+
+  theme(legend.position = "none")
+pdf("./Figure3_plot/Figure3A_one_vs_two_iden.pdf",width = 7,height = 4)
+p_one_vs_two_left+ylim(0,4400) + p_one_vs_two_right+ylim(0,20000)
+dev.off()
+
+pdf("./Figure3_plot/Figure3A_one_vs_two_corr.pdf",width = 5,height = 5)
+scatter_plot_with_r_and_p_3_from_data_and_info_sp(data_one_vs_two_pro,c(rep("One-step",10),rep("Two-step",10)))+
+    scale_color_distiller(palette= 3, direction=1)+
+  xlab("One-step Log10 Intensity")+
+  ylab("Two-step Log10 Intensity")+
+  theme_yzc+
+  theme(legend.position = "none")
+
+dev.off()
+
+
+```
+
