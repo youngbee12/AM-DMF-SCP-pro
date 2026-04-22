@@ -1,0 +1,81 @@
+---
+title: "Mass Spectrometry-Based Single-Cell Proteomics Data Analysis"
+author: "Zhicheng Yang"
+date: "2026-04-22"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+
+prepare_child_rmd <- function(path) {
+  lines <- readLines(path, warn = FALSE, encoding = "UTF-8")
+  yaml_start <- which(trimws(lines) == "---")[1]
+
+  if (is.na(yaml_start)) {
+    stop(sprintf("No YAML header found in %s", path))
+  }
+
+  lines <- lines[yaml_start:length(lines)]
+  yaml_marks <- which(trimws(lines) == "---")
+
+  if (length(yaml_marks) >= 2) {
+    body <- lines[(yaml_marks[2] + 1):length(lines)]
+  } else {
+    body <- lines
+  }
+
+  tmp <- tempfile(pattern = "child_", fileext = ".Rmd")
+  writeLines(body, tmp, useBytes = TRUE)
+  tmp
+}
+
+figure2_child <- prepare_child_rmd("Figure2.Rmd")
+figure3_child <- prepare_child_rmd("Figure3.Rmd")
+figure3_updated_child <- prepare_child_rmd("Figure3_20251125.Rmd")
+figure4_child <- prepare_child_rmd("Figure4.Rmd")
+```
+
+# Overview
+
+This notebook consolidates the analysis code from the original figure-specific R Markdown files into a single entry point.
+
+The source files are kept alongside this notebook:
+
+- `Figure2.Rmd`
+- `Figure3.Rmd`
+- `Figure3_20251125.Rmd`
+- `Figure4.Rmd`
+
+The original data directories and generated plot outputs are not bundled in this export repository.
+
+# Figure 2
+
+```{r figure2, child = figure2_child}
+```
+
+# Figure 3
+
+## Original Version
+
+```{r figure3, child = figure3_child}
+```
+
+## Updated Version (2025-11-25)
+
+```{r figure3-updated, child = figure3_updated_child}
+```
+
+# Figure 4
+
+```{r figure4, child = figure4_child}
+```
