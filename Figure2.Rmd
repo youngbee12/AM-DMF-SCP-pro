@@ -1,0 +1,1340 @@
+df_med <- df_log |>
+  rowwise() |>
+  mutate(
+    one_med = median(c_across(starts_with("one_")), na.rm = TRUE),
+    two_med = median(c_across(starts_with("two_")), na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  filter(!is.na(one_med), !is.na(two_med))
+---
+title: "Mass Spectrometry-Based Single-Cell Proteomics Data Analysis"
+author: "Zhicheng Yang"
+date: "2025-07-15"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    code_folding: hide
+fontsize: 18pt
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.height = 6,
+  fig.width = 8,render = F
+)
+setwd(".")
+source("../../20240703function_combine.R")
+library(Seurat)
+library(scp)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(data.table)
+library(QFeatures)
+library(viridis)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(SingleCellExperiment)
+group_valuess = wheel("steelblue", num = 4)
+```
+
+```{r function}
+
+spectronaut_to_iden<-function(data){
+  data1<-data[,grep(".Quantity",colnames(data))]
+  colnames(data1)<-unname(sapply(colnames(data1),function(x) strsplit(x,"\\.")[[1]][4]))
+  data1[data1=="NaN"]<-NA
+   p_num<-data.frame(colSums ( !is.na ( data1 )))
+  colnames(p_num)<-"p_num"
+  p_num$sample<-rownames(p_num)
+  return(p_num)
+}
+add_meta <- function(df, method, metric, chars = "SPD"){
+  pattern <- paste0("(?i)(\\d+)(?=\\s*", chars, ")")
+  
+  df %>%
+    mutate(
+      method = method,
+      metric = metric,
+      chars_num = coalesce(
+        suppressWarnings(as.integer(str_extract(sample, pattern))),
+        suppressWarnings(as.integer(str_extract(sample, "\\d+")))
+      ),
+      chars = factor(paste0(chars_num, " ", chars),
+                     levels = unique(paste0(sort(unique(chars_num)), " ", chars)))
+    ) %>%
+    transmute(sample, chars, method, metric, value = p_num)
+}
+
+plot_data_direct_plus_method_eval<-function(data_long){
+sum_dat <- data_long %>%
+  group_by(chars, method, metric) %>%
+  summarise(mean = mean(value, na.rm = TRUE),
+            sd   = sd(value,   na.rm = TRUE),
+            n    = sum(!is.na(value)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(method, metric))
+
+dat_norm <- data_long %>%
+  mutate(
+    metric = case_when(
+      str_detect(metric, regex("^pg",  TRUE)) ~ "PGs",
+      str_detect(metric, regex("^pre", TRUE)) ~ "Precursors",
+      TRUE ~ metric
+    ),
+    method = factor(method, levels = c("Method evaluation","DirectDIA+")),
+    chars  = factor(chars)
+  )
+
+pgs_tbl <- sum_dat %>% filter(metric=="PGs") %>%
+  mutate(y = mean, lab_pgs = sprintf("%d", round(mean)))
+pgs_pts <- filter(dat_norm, metric == "PGs")
+prec_tbl <- sum_dat %>% filter(metric=="Precursors") %>%
+  mutate(y = mean, lab_prec = sprintf("%.1f", mean))
+prec_pts <- filter(dat_norm, metric == "Precursors")
+p1<-ggplot() + 
+  geom_col(data = pgs_tbl, aes(x = chars, y = y, group = method, fill = method),
+           position = "identity",
+           alpha = 0.7, 
+           #position = pd,
+           width = 0.72, 
+           color = "black",
+           linewidth = 0.25)+
+    geom_line(data = pgs_tbl,aes(x=chars, y=y, group=method,color=method), position="identity", size=0.8) +
+  scale_fill_manual(values = c("Method evaluation" = group_valuess[1], "DirectDIA+" = "#B0E0E6"))+
+  scale_color_manual(values = c("Method evaluation" = group_valuess[1], "DirectDIA+" = "#B0E0E6"))+
+  geom_text(data = pgs_tbl, aes(x = chars, y = y, label = scales::comma(round(y)), group = method),
+            position = "identity",color = "black",
+            fontface = "bold", size = 3.1, vjust = -0.5)+
+  geom_point(data = pgs_pts, aes(x = chars, y = value, group = method),
+             position =  "identity", shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.35) +
+  labs(x=NULL,y="Protein Groups")+
+  theme_yzc
+
+p2<-ggplot() + 
+  geom_col(data = prec_tbl, aes(x = chars, y = y, group = method, fill = method),
+           position = "identity",
+           alpha = 0.7, 
+           #position = pd,
+           width = 0.72, 
+           color = "black",
+           linewidth = 0.25)+
+    geom_line(data = prec_tbl,aes(x=chars, y=y, group=method,color=method), position="identity", size=0.8) +
+  scale_fill_manual(values = c("Method evaluation" = group_valuess[2], "DirectDIA+" = "#DDA0DD"))+
+    scale_color_manual(values = c("Method evaluation" = group_valuess[2], "DirectDIA+" = "#DDA0DD"))+
+  geom_text(data = prec_tbl, aes(x = chars, y = y, label = scales::comma(round(y)), group = method),
+            position = "identity",color = "black",
+            fontface = "bold", size = 3.1, vjust = -0.2)+
+  geom_point(data = prec_pts, aes(x = chars, y = value, group = method),
+             position =  "identity", shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.35) +
+   #geom_line(data = prec_tbl,aes(x=chars, y=y, group=method,color=method), position="identity", size=0.8) +
+  labs(x=NULL,y="Peptides")+
+  theme_yzc
+     
+return(p1/p2)
+
+}
+
+
+
+
+spectronaut_amount_to_long <- function(data, feature_col = NULL) {
+ #   data=data_pep_directdia_amoun
+ # feature_col = "PEP.GroupingKey"
+  qty <- data[,c(1,grep("\\.Quantity$", colnames(data)))]
+  colnames(qty) <- c(feature_col,unname(sapply(colnames(qty[-1]), function(x) strsplit(x, "\\.")[[1]][4])))
+  qty[qty == "NaN"] <- NA
+  qty <- as.data.frame(qty)
+  
+  # Determine feature id for rows
+  if (!is.null(feature_col) && feature_col %in% names(data)) {
+    feature <- data[[feature_col]]
+  } else if ("PG.ProteinGroups" %in% names(data)) {
+    feature <- data[["PG.ProteinGroups"]]
+  } else if ("EG.PrecursorId" %in% names(data)) {
+    feature <- data[["EG.PrecursorId"]]
+  } else if ("Precursor.Id" %in% names(data)) {
+    feature <- data[["Precursor.Id"]]
+  } else {
+    feature <- paste0("feat_", seq_len(nrow(qty)))
+  }
+  
+   a<-qty %>%
+    tibble::rownames_to_column(".row") %>%
+     #mutate(feature=feature)%>%
+    select(-.row) %>%
+    pivot_longer(-!!sym(feature_col), names_to = "sample", values_to = "intensity") %>%
+     # as.data.frame(.)%>%
+     dplyr::rename(feature =!!sym(feature_col)) %>%
+    mutate(intensity = suppressWarnings(as.numeric(intensity)))
+}
+add_meta_amount <- function(df_long, method, metric, chars = "pg") {
+  #method<-"DirectDIA+";metric="Precursors"
+  pattern <- paste0("(?i)(\\d+)(?=\\s*", chars, ")")
+  df_long %>%
+    mutate(
+      method = factor(method, levels = c("Method evaluation", "DirectDIA+")),
+      metric = metric,
+      chars_num = coalesce(
+        suppressWarnings(as.integer(str_extract(sample, pattern))),
+        suppressWarnings(as.integer(str_extract(sample, "\\\
+\\d+")))
+      ),
+      chars = factor(paste0(chars_num, " ", chars),
+                     levels = paste0(sort(unique(chars_num)), " ", chars))
+    )
+}
+cv_from_amount <- function(df_long_meta, na_threshold = 0.5, min_reps = 2) {
+  # total replicates per group (for NA filtering)
+  #df_long_meta<-cv_long_cv
+  n_total <- df_long_meta %>%
+    group_by(chars, method, metric) %>%
+    summarise(total = dplyr::n_distinct(sample), .groups = "drop")
+  
+  df_long_meta %>%
+    group_by(chars, method, metric, feature) %>%
+    summarise(
+      n_non_na = sum(!is.na(intensity)),
+      mean_val = mean(intensity, na.rm = TRUE),
+      sd_val   = sd(intensity, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(n_total, by = c("chars","method","metric")) %>%
+    mutate(
+      prop_non_na = n_non_na / pmax(total, 1),
+      cv = sd_val / mean_val
+    ) %>%
+    filter(total >= min_reps, n_non_na >= min_reps, prop_non_na >= (1 - na_threshold), is.finite(cv))
+}
+plot_cv_half_violin<-function(cv_tbl){
+    cv_tbl <- cv_tbl %>% mutate(method = factor(method, levels = c("Method evaluation","DirectDIA+")))
+  # Method evaluation only
+    #cv_tbl<-cv_tbl_cv
+cv_tbl_Pgs<-dplyr::filter(cv_tbl, metric == "PGs")
+cv_tbl_Prec<-dplyr::filter(cv_tbl, metric != "PGs")
+med_tbl_Pgs <- cv_tbl_Pgs %>%
+  group_by(chars, method) %>%
+  summarise(med = median(cv, na.rm = TRUE), .groups = "drop")
+
+med_tbl_Prec <- cv_tbl_Prec %>%
+  group_by(chars, method) %>%
+  summarise(med = median(cv, na.rm = TRUE), .groups = "drop")
+
+p1<-ggplot(cv_tbl_Pgs) +
+  gghalves::geom_half_violin(
+    aes(x = chars, y = cv*100, fill = method),
+    data = cv_tbl_Pgs %>% filter(method == "DirectDIA+"),
+    side = "l", color = "black", width = 0.9, trim = TRUE, alpha = 0.7
+  ) +
+  gghalves::geom_half_violin(
+    aes(x = chars, y = cv*100, fill = method),
+    data = cv_tbl_Pgs %>% filter(method != "DirectDIA+"),
+    side = "r", color = "black", width = 0.9, trim = TRUE, alpha = 0.7
+  ) +
+  geom_text(
+    data = med_tbl_Pgs,
+    aes(x = chars, y = med*100, label = sprintf("%.2f", med*100), color = method),position = position_dodge(width = 0.45),
+    vjust = 1, fontface = "bold", size = 3.5, show.legend = FALSE
+  ) +
+  ylim(0,50)+
+  scale_fill_manual(values = c("DirectDIA+" = group_valuess[1], "Method evaluation" = group_valuess[2])) +
+  scale_color_manual(values = c("DirectDIA+" = "white", "Method evaluation" = "white")) +
+  labs(x = NULL, y = "Protein Groups CV (%)") +
+ theme_yzc
+p2<-ggplot(cv_tbl_Prec) +
+  gghalves::geom_half_violin(
+    aes(x = chars, y = cv*100, fill = method),
+    data = cv_tbl_Prec %>% filter(method == "DirectDIA+"),
+    side = "l", color = "black", width = 0.9, trim = TRUE, alpha = 0.7
+  ) +
+  gghalves::geom_half_violin(
+    aes(x = chars, y = cv*100, fill = method),
+    data = cv_tbl_Prec %>% filter(method != "DirectDIA+"),
+    side = "r", color = "black", width = 0.9, trim = TRUE, alpha = 0.7
+  ) +
+  geom_text(
+    data = med_tbl_Prec,
+    aes(x = chars, y = med*100, label = sprintf("%.2f", med*100), color = method),position = position_dodge(width = 0.45),
+    vjust = 1, fontface = "bold", size = 3.5, show.legend = FALSE
+  ) +
+  ylim(0,50)+
+  scale_fill_manual(values = c("DirectDIA+" = group_valuess[1], "Method evaluation" = group_valuess[2])) +
+  scale_color_manual(values = c("DirectDIA+" = "white", "Method evaluation" = "white")) +
+  labs(x = NULL, y = "Peptides CV (%)") +
+  theme_yzc
+
+return(p1/p2)
+
+  
+}
+
+
+```
+
+```{r amount analysis}
+data_pep_directdia_amoun<-read.delim("./Figure2_data/amount_directDIA.tsv")
+data_pro_directdia_amoun<-read.delim("./Figure2_data/amount_PGs_directDIA.tsv")
+data_pro_method_eval_amoun<-read.delim("./Figure2_data/amount_PGs_method_evaluation.tsv")
+data_pep_method_eval_amoun<-read.delim("./Figure2_data/amount_method_evaluation.tsv")
+  pep_directdia_amoun<-spectronaut_to_iden(data_pep_directdia_amoun)
+  pro_directdia_amoun<-spectronaut_to_iden(data_pro_directdia_amoun)
+  pep_method_eval_amoun<-spectronaut_to_iden(data_pep_method_eval_amoun)
+  pro_method_eval_amoun<-spectronaut_to_iden(data_pro_method_eval_amoun)
+dat_long_amoun <- bind_rows(
+  add_meta(pep_directdia_amoun,   "DirectDIA+",        "Precursors", chars="pg"),
+  add_meta(pro_directdia_amoun,   "DirectDIA+",        "PGs",        chars="pg"),
+  add_meta(pep_method_eval_amoun, "Method evaluation", "Precursors", chars="pg"),
+  add_meta(pro_method_eval_amoun, "Method evaluation", "PGs",        chars="pg")
+)
+p<-plot_data_direct_plus_method_eval(dat_long_amoun)
+pdf("./Figure2_plot/Figure2C_amount.pdf",width=7,height=5)
+(p[[1]]+ylim(0,6500))/(p[[2]]+ylim(0,52000))
+dev.off()
+cv_long_amoun <- bind_rows(
+  spectronaut_amount_to_long(data_pep_directdia_amoun,feature_col = "PEP.GroupingKey")   %>% add_meta_amount("DirectDIA+",        "Precursors", chars = "pg"),
+  spectronaut_amount_to_long(data_pro_directdia_amoun,feature_col = "PG.ProteinGroups")   %>% add_meta_amount("DirectDIA+",        "PGs",        chars = "pg"),
+  spectronaut_amount_to_long(data_pep_method_eval_amoun,feature_col = "PEP.GroupingKey") %>% add_meta_amount("Method evaluation", "Precursors", chars = "pg"),
+  spectronaut_amount_to_long(data_pro_method_eval_amoun,feature_col = "PG.ProteinGroups") %>% add_meta_amount("Method evaluation", "PGs",        chars = "pg")
+)
+cv_tbl_amount <- cv_from_amount(cv_long_amoun, na_threshold = 0.5, min_reps = 2)
+p_cv_amount <- plot_cv_half_violin(cv_tbl_amount)
+pdf("./Figure2_plot/Figure2C_amount_cv.pdf",width=7,height=5)
+p_cv_amount
+dev.off()
+
+
+sum_dat_amoun <- dat_long_amoun %>%
+  group_by(chars, method, metric) %>%
+  summarise(mean = mean(value, na.rm = TRUE),
+            sd   = sd(value,   na.rm = TRUE),
+            n    = sum(!is.na(value)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(method, metric))
+
+sum_dat_pep_amoun_DirectDIA <- sum_dat_amoun %>% filter(metric == "Precursors") %>% filter(method == "DirectDIA+") %>%
+  arrange(desc(mean)) %>%
+  mutate(chars = factor(chars, levels = chars)) %>%
+  mutate(amount=as.numeric(strsplit(as.character(chars),"pg")[[1]][1]))
+
+
+```
+
+
+```{r CV analysis}
+data_pep_directdia_cv<-read.delim("./Figure2_data/CV_pep_directdia.tsv")
+data_pro_directdia_cv<-read.delim("./Figure2_data/CV_pro_directdia.tsv")
+data_pro_method_eval_cv<-read.delim("./Figure2_data/CV_pro_method_eva.tsv")
+data_pep_method_eval_cv<-read.delim("./Figure2_data/CV_pep_method_eva.tsv")
+  pep_directdia_cv<-spectronaut_to_iden(data_pep_directdia_cv)
+  pro_directdia_cv<-spectronaut_to_iden(data_pro_directdia_cv)
+  pep_method_eval_cv<-spectronaut_to_iden(data_pep_method_eval_cv)
+  pro_method_eval_cv<-spectronaut_to_iden(data_pro_method_eval_cv)
+dat_long_cv <- bind_rows(
+  add_meta(pep_directdia_cv,   "DirectDIA+",        "Precursors", chars="neg"),
+  add_meta(pro_directdia_cv,   "DirectDIA+",        "PGs",        chars="neg"),
+  add_meta(pep_method_eval_cv, "Method evaluation", "Precursors", chars="neg"),
+  add_meta(pro_method_eval_cv, "Method evaluation", "PGs",        chars="neg")
+)
+
+p_cv<-plot_data_direct_plus_method_eval(dat_long_cv)
+pdf("./Figure2_plot/Figure2C_cv.pdf",width=7,height=5)
+(p_cv[[1]]+ylim(0,5000))/(p_cv[[2]]+ylim(0,36000))
+dev.off()
+cv_long_cv <- bind_rows(
+  spectronaut_amount_to_long(data_pep_directdia_cv,feature_col = "PEP.GroupingKey")   %>% add_meta_amount("DirectDIA+",        "Precursors", chars = "neg"),
+  spectronaut_amount_to_long(data_pro_directdia_cv,feature_col = "PG.ProteinGroups")   %>% add_meta_amount("DirectDIA+",        "PGs",        chars = "neg"),
+  spectronaut_amount_to_long(data_pep_method_eval_cv,feature_col = "PEP.GroupingKey") %>% add_meta_amount("Method evaluation", "Precursors", chars = "neg"),
+  spectronaut_amount_to_long(data_pro_method_eval_cv,feature_col = "PG.ProteinGroups") %>% add_meta_amount("Method evaluation", "PGs",        chars = "neg")
+)
+cv_tbl_cv <- cv_from_amount(cv_long_cv, na_threshold = 0.5, min_reps = 2)
+p_cv_cv <- plot_cv_half_violin(cv_tbl_cv)
+pdf("./Figure2_plot/Figure2C_cv_cv.pdf",width=7,height=5)
+p_cv_cv
+dev.off()
+```
+
+
+```{r Th analysis}
+data_pep_directdia_Th<-read.delim("./Figure2_data/TH_directDIA.tsv")
+data_pro_directdia_Th<-read.delim("./Figure2_data/TH_PGs_directDIA.tsv")
+data_pro_method_eval_Th<-read.delim("./Figure2_data/TH_PGs_method_evaluation.tsv")
+data_pep_method_eval_Th<-read.delim("./Figure2_data/TH_method_evaluation.tsv")
+  pep_directdia_Th<-spectronaut_to_iden(data_pep_directdia_Th)
+  pro_directdia_Th<-spectronaut_to_iden(data_pro_directdia_Th)
+  pep_method_eval_Th<-spectronaut_to_iden(data_pep_method_eval_Th)
+  pro_method_eval_Th<-spectronaut_to_iden(data_pro_method_eval_Th)
+dat_long_Th <- bind_rows(
+  add_meta(pep_directdia_Th,   "DirectDIA+",        "Precursors", chars="Th"),
+  add_meta(pro_directdia_Th,   "DirectDIA+",        "PGs",        chars="Th"),
+  add_meta(pep_method_eval_Th, "Method evaluation", "Precursors", chars="Th"),
+  add_meta(pro_method_eval_Th, "Method evaluation", "PGs",        chars="Th")
+)
+p_Th<-plot_data_direct_plus_method_eval(dat_long_Th)
+pdf("./Figure2_plot/Figure2C_Th.pdf",width=7,height=5)
+(p_Th[[1]]+ylim(0,5000))/(p_Th[[2]]+ylim(0,32000))
+dev.off()
+
+
+cv_long_Th <- bind_rows(
+  spectronaut_amount_to_long(data_pep_directdia_Th,feature_col = "PEP.GroupingKey")   %>% add_meta_amount("DirectDIA+",        "Precursors", chars = "Th"),
+  spectronaut_amount_to_long(data_pro_directdia_Th,feature_col = "PG.ProteinGroups")   %>% add_meta_amount("DirectDIA+",        "PGs",        chars = "Th"),
+  spectronaut_amount_to_long(data_pep_method_eval_Th,feature_col = "PEP.GroupingKey") %>% add_meta_amount("Method evaluation", "Precursors", chars = "Th"),
+  spectronaut_amount_to_long(data_pro_method_eval_Th,feature_col = "PG.ProteinGroups") %>% add_meta_amount("Method evaluation", "PGs",        chars = "Th")
+)
+cv_tbl_Th <- cv_from_amount(cv_long_Th, na_threshold = 0.5, min_reps = 2)
+p_cv_Th <- plot_cv_half_violin(cv_tbl_Th)
+pdf("./Figure2_plot/Figure2C_Th_cv.pdf",width=7,height=5)
+p_cv_Th
+dev.off()
+
+```
+
+
+
+
+```{r one vs two}
+data_one_vs_two_pro<-read.delim("./Figure3_data/20250919_104403_20250907_Report_pro.tsv")
+
+# 
+# data_one_vs_two_pro[5,2]<-"ARHGEF5"
+# data_one_vs_two_pro[57,2]<-"KRT-85"
+# data_one_vs_two_pro[42,2]<-"Tryspin"
+# data_one_vs_two_pro[54,2]<-"cRAP-P15252"
+# data_one_vs_two_pro[56,2]<-"cRAP-P22629"
+# data_one_vs_two_pro[2606,2]<-"Q6ZSR9"
+
+data_one_vs_two_pep<-read.delim("./Figure3_data/20250919_104403_20250907_Report_pep.tsv")
+
+# pro_one_vs_two<-spectronaut_to_iden(data_one_vs_two_pro)
+# 
+# pro_one_vs_two$source<-c(rep("One-step",10),rep("Two-step",10))
+# 
+# pep_one_vs_two<-spectronaut_to_iden(data_one_vs_two_pep)
+# pep_one_vs_two$source<-c(rep("One-step",10),rep("Two-step",10))
+
+pro_one_vs_two<-spectronaut_to_iden(data_one_vs_two_pro)
+pro_one_vs_two1<-data.frame(p_num=c(pro_one_vs_two$p_num,1685,2678,2376,1946,1901,2033,2719,1626,2171,2343,2029,2434,2708,2347,2729,1882,2089,2935))
+pro_one_vs_two1$source<-c(rep("One-step",10),rep("Two-step",10),rep("yzc-2024",18))
+
+pep_one_vs_two<-spectronaut_to_iden(data_one_vs_two_pep)
+pep_one_vs_two1<-data.frame(p_num=c(pep_one_vs_two$p_num,5388,9148,7743,6109,5910,6594,9281,4476,7411,8135,6542,7967,9202,7864,9632,6106,7170,10740))
+pep_one_vs_two1$source<-c(rep("One-step",10),rep("Two-step",10),rep("yzc-2024",18))
+
+
+
+
+sum_pro_one_vs_two <- pro_one_vs_two1 %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+sum_pep_one_vs_two <- pep_one_vs_two1 %>%
+  group_by(source) %>%
+  summarise(mean = mean(p_num, na.rm = TRUE),
+            sd   = sd(p_num,   na.rm = TRUE),
+            n    = sum(!is.na(p_num)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(source))
+p_one_vs_two_left<-ggplot() +
+  geom_bar(data = sum_pro_one_vs_two,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pro_one_vs_two,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+  #geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+
+  geom_signif(
+    data = pro_one_vs_two1, aes(x = source, y = p_num),
+    comparisons = list(
+      c("One-step", "Two-step"),
+      c("One-step", "yzc-2024"),
+      c("Two-step", "yzc-2024")
+    ),
+    test = "wilcox.test",
+    map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+               ifelse(p < 0.01,  "**",
+               ifelse(p < 0.05,  "*", "ns")))
+      #sprintf("p = %.8f\n%s", p, stars)
+      sprintf("%s", stars)
+    },
+      y_position = c(
+        max(pro_one_vs_two1$p_num) + 300,
+        max(pro_one_vs_two1$p_num) + 600,
+        max(pro_one_vs_two1$p_num) + 0
+    ),
+     tip_length = 0.01,
+     textsize = 5
+  )+
+  ylim(0,5000)+
+ 
+  scale_fill_manual(values = c("One-step" =group_valuess[[1]], "Two-step" = group_valuess[[2]],"yzc-2024"=group_valuess[[3]])) +
+  labs(x = NULL, y = "Protein Groups") +
+ theme_yzc+
+  theme(legend.position = "none")
+
+p_one_vs_two_right<-ggplot() +
+  geom_bar(data = sum_pep_one_vs_two,aes(x=source,y=mean,fill = source),stat = "identity",alpha=0.8,width = 0.3) +
+    geom_errorbar(data = sum_pep_one_vs_two,aes(x=source,ymin=(mean-sd), ymax=(mean+sd)), width=0.2, position=position_dodge(0.7)) +
+  #geom_jitter(width = 0.12, size = 2, alpha = 0.7, show.legend = FALSE) +
+
+  geom_signif(
+    data = pep_one_vs_two1, aes(x = source, y = p_num),
+    comparisons = list(
+      c("One-step", "Two-step"),
+      c("One-step", "yzc-2024"),
+      c("Two-step", "yzc-2024")
+    ),
+    test = "wilcox.test",
+    map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+               ifelse(p < 0.01,  "**",
+               ifelse(p < 0.05,  "*", "ns")))
+      #sprintf("p = %.8f\n%s", p, stars)
+      sprintf("%s", stars)
+    },
+      y_position = c(
+        max(pep_one_vs_two1$p_num) + 1200,
+        max(pep_one_vs_two1$p_num) + 2400,
+        max(pep_one_vs_two1$p_num) + 0
+    ),
+     tip_length = 0.01,
+     textsize = 5
+  )+
+  ylim(0,22000)+
+ 
+  scale_fill_manual(values = c("One-step" =group_valuess[[1]], "Two-step" = group_valuess[[2]],"yzc-2024"=group_valuess[[3]])) +
+  labs(x = NULL, y = "Peptides") +
+ theme_yzc+
+  theme(legend.position = "none")
+pdf("./Figure2_plot/Figure2D_one_vs_two_iden.pdf",width = 12,height = 4)
+p_one_vs_two_left + p_one_vs_two_right+p_one_vs_two_mid
+dev.off()
+
+pdf("./Figure3_plot/Figure3A_one_vs_two_corr.pdf",width = 5,height = 5)
+scatter_plot_with_r_and_p_3_from_data_and_info_sp_pro(data_one_vs_two_pro,c(rep("One-step",10),rep("Two-step",10)))+
+    scale_color_distiller(palette= 3, direction=1)+
+  xlab("One-step Log10 Intensity")+
+  ylab("Two-step Log10 Intensity")+
+  theme_yzc+
+  theme(legend.position = "none")
+
+dev.off()
+
+
+```
+
+
+```{r one vs two DEP}
+data_one_vs_two_pro<-data_one_vs_two_pro%>%  filter(!grepl("cRAP", PG.ProteinGroups)) 
+data_clean_one_vs_two_pro_dep <- data_one_vs_two_pro %>%
+  select(PG.Genes, matches("\\.PG\\.Quantity")) %>%
+ dplyr::filter(PG.Genes != "")
+data_clean_one_vs_two_pro_dep[data_clean_one_vs_two_pro_dep=="NaN"] <- NA
+data_clean_one_vs_two_pro_dep<-keep_first_Gene_sp(data_clean_one_vs_two_pro_dep)
+#prot_df_clean<-keep_first_Gene(prot_df_clean)
+# data_clean_one_vs_two_pro_dep<-samerow_mean(data_clean_one_vs_two_pro_dep)
+rownames(data_clean_one_vs_two_pro_dep)<-data_clean_one_vs_two_pro_dep$PG.Genes
+data_clean_one_vs_two_pro_dep<-data_clean_one_vs_two_pro_dep[,-1]
+
+group_info_one_vs_two_pro_dep<-data.frame(group=c(rep("One-step",10),rep("Two-step",10)))
+group_info_one_vs_two_pro_dep$sample<-colnames(data_clean_one_vs_two_pro_dep)
+group_info_one_vs_two_pro_dep<-group_info_one_vs_two_pro_dep %>% dplyr::select(sample,group)
+rownames(group_info_one_vs_two_pro_dep)<-group_info_one_vs_two_pro_dep$sample
+data_clean_one_vs_two_pro_dep_filter<-filter_na_bygroup(data_clean_one_vs_two_pro_dep, group_info_one_vs_two_pro_dep , x = 0.5)
+data_clean_one_vs_two_pro_dep_filter<-median_correct(data_clean_one_vs_two_pro_dep_filter)
+data_clean_one_vs_two_pro_dep_filter1<-data_clean_one_vs_two_pro_dep_filter
+library(impute)
+data_clean_one_vs_two_pro_dep_filter1<-impute.knn(as.matrix(log2(data_clean_one_vs_two_pro_dep_filter)) ,k = 5, rowmax = 0.7, colmax = 0.8, maxp = 1500, rng.seed=362436069)
+data_clean_one_vs_two_pro_dep_filter1<-data.frame(data_clean_one_vs_two_pro_dep_filter1$data)
+colnames(data_clean_one_vs_two_pro_dep_filter1)<-colnames(data_clean_one_vs_two_pro_dep_filter)
+DEP_one_vs_two_pro<-limma_nopair_test_2cluster(data_log2 = log2(data_clean_one_vs_two_pro_dep_filter),cluster = group_info_one_vs_two_pro_dep%>%dplyr::select(group),desc = F,p_value = 0.01,Fc_value =1.5,method = "BH")
+vocanol_plot(DEP_one_vs_two_pro$data,p.value = 0.01,Fc_value=1.5)+theme_yzc
+
+
+
+
+
+
+
+library(dplyr)
+expr_mat<-data_clean_one_vs_two_pro_dep
+meta<-group_info_one_vs_two_pro_dep
+expr_mat <- expr_mat[, meta$sample]
+
+expr_bin <- !is.na(expr_mat)
+
+groups <- unique(meta$group)
+
+feature_list <- lapply(groups, function(g) {
+  
+  samples_g <- meta %>%
+    filter(group == g) %>%
+    pull(sample)
+  
+  mat_g <- expr_bin[, samples_g]
+  
+  ratio <- rowMeans(mat_g, na.rm = TRUE)
+  
+  # ≥50%
+  features <- names(ratio[ratio >= 0.5])
+  
+  return(features)
+})
+
+names(feature_list) <- groups
+group1 <- feature_list[[1]]
+group2 <- feature_list[[2]]
+
+common_features <- intersect(group1, group2)
+unique_g1 <- setdiff(group1, group2)
+unique_g2 <- setdiff(group2, group1)
+library(ggVennDiagram)
+
+venn <- ggVennDiagram(feature_list, label_alpha = 0) +
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") +
+  theme_void()+coord_flip()+theme_yzc
+
+
+pdf("./Figure2_plot/Figure2F_veen_plot.pdf",width = 5,height = 4)
+print(venn)
+dev.off()
+
+
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+group1_name <- "One-step"
+group2_name <- "Two-step"
+pseudo <- 1
+
+meta <- meta %>% filter(sample %in% colnames(expr_mat))
+expr_mat <- expr_mat[, meta$sample, drop = FALSE]
+
+get_group_rank_df <- function(expr_mat, meta, group_name, detected_features = NULL, pseudo = 1) {
+  samples_g <- meta %>%
+    filter(group == group_name) %>%
+    pull(sample)
+  
+  mat_g <- expr_mat[, samples_g, drop = FALSE]
+  
+  if (!is.null(detected_features)) {
+    mat_g <- mat_g[detected_features, , drop = FALSE]
+  }
+  
+  intensity <- apply(mat_g, 1, function(x) {
+    if (all(is.na(x))) return(NA_real_)
+    median(x, na.rm = TRUE)
+  })
+  
+  df <- tibble(
+    feature = rownames(mat_g),
+    intensity = intensity
+  ) %>%
+    filter(!is.na(intensity), intensity > 0) %>%
+    arrange(desc(intensity)) %>%
+    mutate(
+      rank = row_number(),
+      log10_intensity = log10(intensity + pseudo),
+      group = group_name
+    )
+  
+  df
+}
+
+df_g1 <- get_group_rank_df(
+  expr_mat, meta, group1_name,
+  detected_features = feature_list[[group1_name]],
+  pseudo = pseudo
+)
+
+df_g2 <- get_group_rank_df(
+  expr_mat, meta, group2_name,
+  detected_features = feature_list[[group2_name]],
+  pseudo = pseudo
+)
+
+rank_df <- bind_rows(df_g1, df_g2) %>%
+  mutate(
+    highlight = ifelse(group == group1_name & feature %in% unique_g1,
+                       "one-step unique", "other")
+  )
+
+p <- ggplot() +
+  geom_line(
+    data = rank_df,
+    aes(x = rank, y = log10_intensity, color = group),
+    linewidth = 0.9,
+    alpha = 0.9
+  ) +
+  geom_point(
+    data = rank_df %>% filter(highlight == "one-step unique"),
+    aes(x = rank, y = log10_intensity),
+    color = "red",
+    size = 1.5,
+    alpha = 0.6
+  ) +
+  labs(
+    x = "Rank",
+    y = expression(log[10](Intensity)),
+    color = NULL
+  ) +
+  scale_color_manual(values = c("One-step" = group_valuess[[1]], "Two-step" = group_valuess[[2]])) +
+  theme_classic(base_size = 14)+theme_yzc
+pdf("./Figure2_plot/Figure2F_rank_plot.pdf",width = 5,height = 4)
+print(p)
+dev.off()
+
+```
+
+```{r protein_abs_copynum}
+proteins_all <- read.csv("./ref_code/Protein_abs_copynum/HeLaHF14k.csv")
+  rownames(proteins_all)<-proteins_all$Accession
+  gene<-data.frame(proteins_all$Accession)
+  print(dim(gene)[1])
+  colnames(gene)<-"gene"
+  
+  
+  
+#all
+data_pro_compare_all<- data_one_vs_two_pro %>%
+  select(PG.ProteinGroups, matches("\\.PG\\.Quantity")) %>%
+  #filter(grepl("cRAP", PG.ProteinGroups)) %>%
+  pivot_longer(
+    cols = matches("\\.PG\\.Quantity"),
+    names_to = "Sample",
+    values_to = "Quantity"
+  )
+
+data_pro_compare_all$Log10Quantity<-log10(data_pro_compare_all$Quantity+1)
+group_info_compare_cRAP<-data.frame(Sample=unique(data_pro_compare_all$Sample),
+                                 source=c(rep("One-step",10),rep("Two-step",10)))
+data_pro_compare_all<-merge(data_pro_compare_all,group_info_compare_cRAP,by="Sample")
+
+  sum_dat_compare <- data_pro_compare_all %>%
+  group_by(source,PG.ProteinGroups) %>%
+  summarise(mean = mean(Log10Quantity, na.rm = TRUE),
+            sd   = sd(Log10Quantity,   na.rm = TRUE),
+            n    = sum(!is.na(Log10Quantity)),
+            .groups = "drop") %>%
+  mutate(fill_group = source)
+sum_dat_compare<-sum_dat_compare%>% filter(n>2)
+plate_all<-unique(sum_dat_compare$PG.ProteinGroups[sum_dat_compare$source=="One-step"])
+AM_DMF_SCP_all<-unique(sum_dat_compare$PG.ProteinGroups[sum_dat_compare$source=="Two-step"])
+
+  ### Get the overlap
+  proteins_both <- proteins_all %>%
+    dplyr::filter( Accession%in% plate_all)
+  proteins_both2 <- proteins_all %>%
+    filter(Accession %in% AM_DMF_SCP_all)
+  
+  three<-listn[[1]]
+  threeacc<-clusterProfiler::bitr(three, fromType = "SYMBOL", toType = "UNIPROT",OrgDb ="org.Hs.eg.db")
+  proteins_both3<-proteins_all %>%
+    filter(Accession %in% threeacc$UNIPROT)
+proteins_all_final<-proteins_all
+color_all<-"black"
+color_both<-"#AF46B4"
+transparency<-0.1
+p_one_vs_two_mid<-ggplot(proteins_all_final) +
+    xlab("Log")+
+    ylab("Count")+
+    geom_histogram(
+      data = proteins_all_final,
+      aes_string(x = "Log"), 
+      color = color_all,
+      fill = color_all,
+      alpha = transparency,
+      bins = 20
+    ) +geom_vline(xintercept=mean(proteins_all_final$Log),linetype = "dashed")+
+    geom_histogram(
+      data = proteins_both,
+      aes_string(x = "Log"), 
+      color = "#4682B4",
+      fill = "#4682B4",
+      alpha = transparency,
+      bins = 20
+    )+geom_vline(xintercept=mean(proteins_both$Log),color="#4682B4",linetype = "dashed")+
+    geom_histogram(
+      data = proteins_both2,
+      aes_string(x = "Log"), 
+      color = "#AF46B4",
+      fill = color_both,
+      alpha = transparency,
+      bins = 20
+    ) +geom_vline(xintercept=mean(proteins_both2$Log),color="#AF46B4",linetype = "dashed")+
+        geom_histogram(
+      data = proteins_both3,
+      aes_string(x = "Log"), 
+      color = group_valuess[[3]],
+      fill = color_both,
+      alpha = transparency,
+      bins = 20
+    ) +geom_vline(xintercept=mean(proteins_both3$Log),color=group_valuess[[3]],linetype = "dashed")+
+    
+    geom_text(aes(x =4, y = 1000, label = paste0("Mean(All) = ", round(mean(proteins_all_final$Log), 2))),
+                    hjust = 0, vjust = 1, color = "black", size = 6) +  
+    geom_text(aes(x =4, y = 1000, label = paste0("\nMean(One-step)= ",round(mean(proteins_both$Log), 2))),
+                    hjust = 0, vjust = 1, color = "#4682B4", size =6) +  
+    geom_text(aes(x =4, y = 1000, label = paste0("\n\nMean(Two-step)= ",round(mean(proteins_both2$Log), 2))),
+                    hjust = 0, vjust = 1, color = "#AF46B4", size = 6) +
+      geom_text(aes(x =4, y = 1000, label = paste0("\n\n\nMean(yzc-2024)= ",round(mean(proteins_both3$Log), 2))),
+                    hjust = 0, vjust = 1, color =   group_valuess[[3]], size = 6) +
+
+  
+    theme_bw() +
+    
+    theme(  #legend.position = "none",
+            #axis.line = element_line(size=1.5),
+            axis.text.x = element_text(color="black", size=16, face="plain",angle=0,hjust=0.5) ,# Values for face are one of "plain", "italic", "bold" and "bold.italic"
+            axis.text.y = element_text(color="black", size=16, face="plain"),
+            axis.title.x = element_text(color="black", size=16, face="bold"),
+            axis.title.y = element_text(color="black", size=16, face="bold"),
+            legend.text=element_text(color="black", size=16, face="bold"),
+            legend.title=element_text(color="black", size=16, face="bold"),
+            title = element_text(color="black", size=16, face="bold"))+
+  theme_yzc
+
+    
+dev.off()
+
+```
+
+```{r corrmat}
+library(PerformanceAnalytics)
+data_one_vs_two_pro_1<- data_one_vs_two_pro %>%
+  select(matches("\\.PG\\.Quantity"))
+ colnames(data_one_vs_two_pro_1)<-c(paste("One",1:10),paste("Two",1:10))
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor) 
+   {
+       usr <- par("usr"); on.exit(par(usr)) 
+       par(usr = c(0, 1, 0, 1))
+      r <- abs(cor(x, y,use="pairwise.complete.obs")) 
+       txt <- format(c(r, 0.123456789), digits=digits)[1] 
+       txt <- paste(prefix, txt, sep="") 
+       if(missing(cex.cor)) cex <- 0.8/strwidth(txt) 
+       
+           test <- cor.test(x,y) 
+           # borrowed from printCoefmat
+             Signif <- symnum(test$p.value, corr = FALSE, na = FALSE, 
+                                                   cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1),
+                                                  symbols = c("***", "**", "*", ".", " ")) 
+             
+               text(0.5, 0.5, txt, cex = cex * r) 
+             text(.8, .8, Signif, cex=cex, col=2) 
+           }
+png("./Figure2_plot/Figure2E_corr.png",width = 7,height = 7)
+ pairs(log2(data_one_vs_two_pro_1), upper.panel=panel.cor, gap=0,font.labels = 0.6)
+ dev.off()
+
+ 
+ df_med <- log10(data_one_vs_two_pro_1) |>
+  rowwise() |>
+  mutate(
+    one_med = median(c_across(starts_with("One")), na.rm = TRUE),
+    two_med = median(c_across(starts_with("Two")), na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  filter(!is.na(one_med), !is.na(two_med))
+
+ library(ggplot2)
+library(hexbin)
+
+r_p <- cor(df_med$one_med, df_med$two_med, method = "pearson")
+r_s <- cor(df_med$one_med, df_med$two_med, method = "spearman")
+
+p_cor_2<-ggplot(df_med, aes(one_med, two_med)) +
+  geom_hex(bins = 120) +
+  scale_fill_viridis_c(trans = "log10") +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "red") +
+  annotate(
+    "text",
+    x = min(df_med$one_med) + 0.5,
+    y = max(df_med$two_med) - 0.5,
+    label = paste0(
+      "Pearson r = ", round(r_p, 2), "\n"
+     # "Spearman ρ = ", round(r_s, 2)
+    ),
+    size = 4.5
+  ) +
+  labs(
+    x = "One-step log10 intensity",
+    y = "Two-step log10 intensity"
+  ) +
+  theme_yzc
+pdf("./Figure2_plot/Figure2E_corr_med.pdf",width = 7,height = 7)
+p_cor_2+theme(legend.position = "none")
+dev.off()
+
+# 
+#  library(pheatmap)
+# 
+# one_mat <-  log10(data_one_vs_two_pro_1) |>
+#   select(starts_with("One")) |>
+#   as.matrix()
+# 
+# cor_one <- cor(one_mat, use = "pairwise.complete.obs", method = "pearson")
+# 
+# pheatmap(
+#   cor_one,
+#   cluster_rows = FALSE,
+#   cluster_cols = FALSE,
+#   main = "One-step replicate correlation (Pearson)"
+# )
+df_ba <- df_med |>
+  mutate(
+    mean_logI = (one_med + two_med) / 2,
+    diff_logI = one_med - two_med
+  )
+bias <- mean(df_ba$diff_logI, na.rm = TRUE)
+sd_diff <- sd(df_ba$diff_logI, na.rm = TRUE)
+
+loa_upper <- bias + 1.96 * sd_diff
+loa_lower <- bias - 1.96 * sd_diff
+library(ggplot2)
+
+p_ba<-ggplot(df_ba, aes(mean_logI, diff_logI)) +
+  geom_point(alpha = 0.35, size = 0.8) +
+  geom_hline(yintercept = bias, color = "red", linewidth = 1) +
+  geom_hline(yintercept = loa_upper, linetype = "dashed") +
+  geom_hline(yintercept = loa_lower, linetype = "dashed") +
+  annotate(
+    "text",
+    x = min(df_ba$mean_logI, na.rm = TRUE),
+    y = bias,
+    label = paste0("Bias = ", round(bias, 3)),
+    hjust = 0,
+    vjust = -0.5
+  ) +
+  annotate(
+    "text",
+    x = min(df_ba$mean_logI, na.rm = TRUE),
+    y = loa_upper,
+    label = paste0("+1.96 SD = ", round(loa_upper, 3)),
+    hjust = 0,
+    vjust = -0.5
+  ) +
+  annotate(
+    "text",
+    x = min(df_ba$mean_logI, na.rm = TRUE),
+    y = loa_lower,
+    label = paste0("-1.96 SD = ", round(loa_lower, 3)),
+    hjust = 0,
+    vjust = 1.2
+  ) +
+  labs(
+    x = "Mean log10 intensity",
+    y = "Difference (one-step − two-step)",
+   # title = "Bland–Altman analysis of quantitative agreement"
+  ) +
+  theme_yzc
+
+ 
+ 
+pdf("./Figure2_plot/Figure2E_bland_altman.pdf",width = 7,height = 7)
+p_ba
+dev.off()
+
+
+
+
+
+
+
+df_mv <- log10(data_one_vs_two_pro_1) |>
+  rowwise() |>
+  mutate(
+    one_med = median(c_across(starts_with("One")), na.rm = TRUE),
+    two_med = median(c_across(starts_with("Two")), na.rm = TRUE),
+
+    one_miss = mean(is.na(c_across(starts_with("One")))),
+    two_miss = mean(is.na(c_across(starts_with("Two"))))
+  ) |>
+  ungroup()
+df_bin <- df_mv |>
+  filter(!is.na(one_med)) |>
+  mutate(
+    intensity_bin = cut(
+      one_med,
+      breaks = quantile(one_med, probs = seq(0, 1, by = 0.1), na.rm = TRUE),
+      include.lowest = TRUE
+    )
+  ) |>
+  group_by(intensity_bin) |>
+  summarise(
+    one_miss_rate = mean(one_miss, na.rm = TRUE),
+    two_miss_rate = mean(two_miss, na.rm = TRUE),
+    n_protein = n(),
+    bin_center = mean(one_med, na.rm = TRUE)
+  )
+
+library(ggplot2)
+
+ggplot(df_bin, aes(bin_center)) +
+  geom_line(aes(y = one_miss_rate, color = "One-step"), linewidth = 1.2) +
+  geom_point(aes(y = one_miss_rate, color = "One-step"), size = 2) +
+  geom_line(aes(y = two_miss_rate, color = "Two-step"), linewidth = 1.2) +
+  geom_point(aes(y = two_miss_rate, color = "Two-step"), size = 2) +
+  scale_color_manual(values = c("One-step" = "#2C7FB8", "Two-step" = "#C77CFF")) +
+  labs(
+    x = "Protein abundance (log10 intensity)",
+    y = "Missing value rate",
+    color = "",
+    title = "Missing value rate as a function of protein abundance"
+  ) +
+  theme_yzc
+
+
+
+library(dplyr)
+library(ggplot2)
+
+df_consistency <- log10(data_one_vs_two_pro_1) |>
+  rowwise() |>
+  mutate(
+    one_med = median(c_across(starts_with("One")), na.rm = TRUE),
+    two_med = median(c_across(starts_with("Two")), na.rm = TRUE),
+
+    one_detected = sum(!is.na(c_across(starts_with("One")))),
+    two_detected = sum(!is.na(c_across(starts_with("Two"))))
+  ) |>
+  ungroup() |>
+  filter(!is.na(one_med), !is.na(two_med))
+
+df_bin <- df_consistency |>
+  mutate(
+    intensity_bin = cut(
+      one_med,
+      breaks = quantile(one_med, probs = seq(0, 1, 0.1), na.rm = TRUE),
+      include.lowest = TRUE
+    )
+  ) |>
+  group_by(intensity_bin) |>
+summarise(
+  bin_center = mean(one_med, na.rm = TRUE),
+  one_detect_mean = mean(one_detected),
+  one_detect_se = sd(one_detected) / sqrt(n()),
+  two_detect_mean = mean(two_detected),
+  two_detect_se = sd(two_detected) / sqrt(n())
+)
+
+# df_bin columns:
+# bin_center, one_detect_mean, two_detect_mean
+
+library(ggplot2)
+
+p_rib<-ggplot(df_bin, aes(x = bin_center)) +
+  geom_ribbon(
+    aes(
+      ymin = one_detect_mean - one_detect_se,
+      ymax = one_detect_mean + one_detect_se
+    ),
+    fill = "#2C7FB8", alpha = 0.2
+  ) +
+  geom_line(
+    aes(y = one_detect_mean, color = "One-step"),
+    linewidth = 1.4
+  ) +
+  geom_point(
+    aes(y = one_detect_mean, color = "One-step"),
+    size = 2.8
+  ) +
+  geom_ribbon(
+    aes(
+      ymin = two_detect_mean - two_detect_se,
+      ymax = two_detect_mean + two_detect_se
+    ),
+    fill = "#C77CFF", alpha = 0.2
+  ) +
+  geom_line(
+    aes(y = two_detect_mean, color = "Two-step"),
+    linewidth = 1.4
+  ) +
+  geom_point(
+    aes(y = two_detect_mean, color = "Two-step"),
+    size = 2.8
+  ) +
+  scale_color_manual(
+    values = c("One-step" = "#2C7FB8", "Two-step" = "#C77CFF")
+  ) +
+  labs(
+    x = "Protein abundance (log10 intensity)",
+    y = "Detected replicates (out of 10)",
+    color = ""
+  ) +
+  theme_yzc
+
+
+
+pdf("./Figure2_plot/Figure2F_detection_consistency.pdf",width = 7,height = 7)
+p_rib
+dev.off()
+```
+
+```{r mis cleaveage}
+data_one_vs_two_pep<-read.delim("./Figure3_data/20250919_104403_20250907_Report_pep.tsv")
+
+data_one_vs_two_pep[data_one_vs_two_pep=="NaN"]<-NA
+rownames(data_one_vs_two_pep)<-data_one_vs_two_pep$PEP.GroupingKey
+data_one_vs_two_pep$PEP.GroupingKey<-NULL
+df_miss_onevstwo<-calculate_miscleavage_per_sample(data_one_vs_two_pep) %>% filter(Miscleavage %in% 1)
+df_miss_onevstwo$Group1<-unname(sapply(df_miss_onevstwo$Sample, function(x) strsplit(x, "_")[[1]][5]))
+df_miss_onevstwo$Group1<-factor(df_miss_onevstwo$Group1, levels=c("onestep","twostep"))
+# df_miss_onevstwo$Group2<-unname(sapply(df_miss_onevstwo$Sample, function(x) strsplit(x, "_")[[1]][5]))
+# df_miss_onevstwo$Group2<-factor(df_miss_onevstwo$Group2, levels=c("5min","15min","30min","60min","120min"))
+sum_dat <- df_miss_onevstwo %>%
+  group_by(Group1) %>%
+  summarise(mean = mean(Fraction, na.rm = TRUE),
+            sd   = sd(Fraction,   na.rm = TRUE),
+            n    = sum(!is.na(Fraction)),
+            .groups = "drop") %>%
+  mutate(fill_group = paste(Group1))
+step_mis_compare<-ggplot(sum_dat, aes(x=Group1, y=mean*200,fill=Group1)) +
+  geom_bar(stat="identity", position=position_dodge(), width=0.7,alpha=0.8) +
+  geom_errorbar(aes(ymin=(mean-sd)*200, ymax=(mean+sd)*200), width=0.2, position=position_dodge(0.7),alpha=0.8) +
+   geom_signif(
+    data = df_miss_onevstwo, aes(x = Group1, y = Fraction),
+    comparisons = list(
+      c("onestep", "twostep")
+    ),
+    test = "t.test",
+    map_signif_level = function(p) {
+      stars <- ifelse(p < 0.001, "***",
+               ifelse(p < 0.01,  "**",
+               ifelse(p < 0.05,  "*", "ns")))
+      #sprintf("p = %.8f\n%s", p, stars)
+      sprintf("%s", stars)
+    },
+      y_position = c(
+        max(df_miss_onevstwo$Fraction)*200 + 2
+    
+    ),
+     tip_length = 0.01,
+     textsize = 5
+  )+
+
+  geom_text(data = sum_dat, aes(x = Group1, y = mean*200, label = scales::comma(round(mean*200,4)), group = Group1),
+            position = position_dodge(0.7),color = "white",
+            fontface = "bold", size = 4, vjust = 5)+
+  geom_point(data = df_miss_onevstwo, aes(x = Group1, y = Fraction*200, group = Group1),
+             position =  position_dodge(0.7), shape = 21, size = 2, stroke = 0.2,
+             fill = "white", color = "black", alpha = 0.85) +
+  #scale_fill_manual(values=group_valuess,guide = "none") +
+  scale_fill_manual(values=group_valuess) +
+  labs(x="", y="Percentage of Missed Cleavages (%)", fill="Group")+
+  theme_yzc
+pdf("./Figure3_plot/Figure3C_miscleavage_compare.pdf",width = 5,height = 7)
+step_mis_compare
+dev.off()
+
+
+
+
+
+
+ data_one_vs_two_pep_long<- spectronaut_amount_to_long(data_one_vs_two_pep,feature_col = "PEP.GroupingKey") 
+data_one_vs_two_pro_long<-spectronaut_amount_to_long(data_one_vs_two_pro,feature_col = "PG.ProteinGroups")
+
+ data_one_vs_two_pep_long<- data_one_vs_two_pep_long %>% mutate(group = unname(sapply(sample, function(x) strsplit(x, "_")[[1]][5])))
+ data_one_vs_two_pro_long<- data_one_vs_two_pro_long %>% mutate(group = unname(sapply(sample, function(x) strsplit(x, "_")[[1]][5])))
+
+na_threshold = 0.5
+min_reps = 3
+  n_total <- data_one_vs_two_pep_long %>%
+    group_by(group) %>%
+    summarise(total = dplyr::n_distinct(sample), .groups = "drop")
+  
+ data_one_vs_two_pep_long_cv<- data_one_vs_two_pep_long %>%
+    group_by(feature,group) %>%
+    summarise(
+      n_non_na = sum(!is.na(intensity)),
+      mean_val = mean(intensity, na.rm = TRUE),
+      sd_val   = sd(intensity, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(n_total) %>%
+    mutate(
+      prop_non_na = n_non_na / pmax(total, 1),
+      cv = sd_val / mean_val
+    ) %>%
+    filter(total >= min_reps, n_non_na >= min_reps, prop_non_na >= (1 - na_threshold), is.finite(cv))
+ 
+   n_total <- data_one_vs_two_pro_long %>%
+    group_by(group) %>%
+    summarise(total = dplyr::n_distinct(sample), .groups = "drop")
+  
+ data_one_vs_two_pro_long_cv<- data_one_vs_two_pro_long %>%
+    group_by(feature,group) %>%
+    summarise(
+      n_non_na = sum(!is.na(intensity)),
+      mean_val = mean(intensity, na.rm = TRUE),
+      sd_val   = sd(intensity, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(n_total) %>%
+    mutate(
+      prop_non_na = n_non_na / pmax(total, 1),
+      cv = sd_val / mean_val
+    ) %>%
+    filter(total >= min_reps, n_non_na >= min_reps, prop_non_na >= (1 - na_threshold), is.finite(cv))
+ 
+ 
+ 
+ data_one_vs_two_pro_long_cv$metric<-"PGs"
+ data_one_vs_two_pep_long_cv$metric<-"PEPs"
+ 
+  cv_tbl <- rbind(data_one_vs_two_pro_long_cv, data_one_vs_two_pep_long_cv)
+  # Method evaluation only
+    #cv_tbl<-cv_tbl_cv
+cv_tbl_Pgs<-dplyr::filter(cv_tbl, metric == "PGs")
+cv_tbl_Prec<-dplyr::filter(cv_tbl, metric != "PGs")
+med_tbl_Pgs <- cv_tbl_Pgs %>%
+  group_by(group) %>%
+  summarise(med = median(cv, na.rm = TRUE), .groups = "drop")
+med_tbl_Pgs$metric<-"PGs"
+med_tbl_Prec <- cv_tbl_Prec %>%
+  group_by(group) %>%
+  summarise(med = median(cv, na.rm = TRUE), .groups = "drop")
+med_tbl_Prec$metric<-"PEPs"
+med_tbl <- rbind(med_tbl_Pgs, med_tbl_Prec)
+pdf("./Figure2_plot/Figure2D_cv_compare1.pdf",width = 7,height = 7)
+ggplot(cv_tbl) +
+  gghalves::geom_half_violin(
+    aes(x = group, y = cv*100, fill = metric),
+    data = cv_tbl %>% filter(metric == "PGs"),
+    side = "l", color = "black", width = 0.9, trim = TRUE, alpha = 0.7
+  ) +
+  gghalves::geom_half_violin(
+    aes(x = group, y = cv*100, fill = metric),
+    data = cv_tbl %>% filter(metric != "PGs"),
+    side = "r", color = "black", width = 0.9, trim = TRUE, alpha = 0.7
+  ) +
+  geom_text(
+    data = med_tbl,
+    aes(x = group, y = med*100, label = sprintf("%.2f", med*100), color = "black"),position = position_dodge(width = 0.45),
+    vjust = 1, fontface = "bold", size = 3.5, show.legend = FALSE
+  ) +
+  ylim(0,100)+
+  scale_fill_manual(values = c("PEPs" = group_valuess[1], "PGs" = group_valuess[2])) +
+  labs(x = NULL, y = "CV (%)") +
+ theme_yzc
+dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fasta_file_path<-"/Users/zhichengyang/Downloads/UP000005640_9606_Homo_sapiens_20210617_con.fasta_td.fasta"
+
+get_hydrovalue_kyte_doolittle_genelist<-function(fasta_file_path,geneList){
+get_seq_from_fasta_genelist<-function(fasta_file_path=fasta_file_path,geneList=c("TP53")){
+  library(Biostrings)
+  library(dplyr)
+  sequences <- readBStringSet(fasta_file_path)
+  sq<-data.frame(sequences)
+  sq$name<-rownames(sq)
+  se1<-sq
+  extract_gene_name <- function(str) {
+    return(sub(".*GN=([^ ]+).*", "\\1", str))
+  }
+  
+  gene_names <- sapply(sq$name, extract_gene_name)
+  se1$gene_names<-gene_names
+  se2<-se1[se1$gene_names %in% geneList,]
+  
+  
+  return(se2)
+}
+a<-get_seq_from_fasta_genelist(fasta_file_path=fasta_file_path,geneList =geneList)
+hydrophobicity_kyte_doolittle <- list(
+  'A' = 1.8,  'C' = 2.5,  'D' = -3.5, 'E' = -3.5, 
+  'F' = 2.8,  'G' = -0.4, 'H' = -3.2, 'I' = 4.5,
+  'K' = -3.9, 'L' = 3.8,  'M' = 1.9,  'N' = -3.5,
+  'P' = -1.6, 'Q' = -3.5, 'R' = -4.5, 'S' = -0.8,
+  'T' = -0.7, 'V' = 4.2,  'W' = -0.9, 'Y' = -1.3
+)
+calculate_protein_hydrophobicity <- function(protein_sequence) {
+  total_score <- 0
+  for (aa in strsplit(protein_sequence, '')[[1]]) {
+    if (aa %in% names(hydrophobicity_kyte_doolittle)) {
+      total_score <- total_score + hydrophobicity_kyte_doolittle[[aa]]
+    }
+  }
+  return(total_score / nchar(protein_sequence))
+}
+results <- sapply(a$sequences, calculate_protein_hydrophobicity)
+value<-data.frame(results)
+
+return(value)
+}
+
+
+
+
+
+one<-get_hydrovalue_kyte_doolittle_genelist(fasta_file_path,feature_list[[1]])
+two<-get_hydrovalue_kyte_doolittle_genelist(fasta_file_path,feature_list[[2]])
+
+
+
+
+one_df <- data.frame(Value = one[,1], Group = "onestep")
+two_df <- data.frame(Value = two[,1], Group = "twostep")
+
+sum_dat <- bind_rows(one_df, two_df)
+
+library(ggplot2)
+library(ggsignif)
+
+
+pdf("./Figure2_plot/Figure2D_hydrovalue_compare1.pdf",width = 7,height = 7)
+
+ggplot(sum_dat, aes(x = Group, y = Value, fill = Group)) +
+  
+  geom_violin(trim = FALSE, alpha = 0.6, color = NA) +
+  
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.8) +
+  
+  #geom_jitter(width = 0.1, size = 1.2, alpha = 0.5) +
+  geom_signif(
+    comparisons = list(c("onestep", "twostep")),
+    test = "wilcox.test",
+    map_signif_level = TRUE,
+    y_position = max(sum_dat$Value) * 1.05,
+    tip_length = 0.01,
+    textsize = 5
+  )+
+  scale_fill_manual(values = c( group_valuess[[1]],group_valuess[[2]])) +
+  theme_yzc
+dev.off()
+
+
+
+
+
+
+
+
+```
